@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Folio</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0e0e0f;--sf:#141416;--s2:#1c1c20;--s3:#252529;
+  --bd:#2c2c32;--b2:#3a3a42;
+  --ac:#d4a843;--adim:rgba(212,168,67,.11);
+  --tx:#eeebe5;--t2:#8e8b86;--t3:#4e4c49;
+  --danger:#d96565;--r:10px;--rs:6px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;overflow:hidden;}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--tx);display:flex;flex-direction:column;user-select:none;}
+
+.tbar{height:38px;background:var(--sf);-webkit-app-region:drag;border-bottom:1px solid var(--bd);display:flex;align-items:center;padding:0 14px;gap:8px;flex-shrink:0;position:relative;}
+.logo{font-family:'Playfair Display',serif;font-size:15px;font-weight:700;color:var(--ac);}
+.tbar-dot{color:var(--t3);}
+.tbar-ctx{font-size:12px;color:var(--t2);}
+.tbar-ver{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--t3);letter-spacing:.8px;font-weight:500;-webkit-app-region:no-drag;background:var(--s2);border:1px solid var(--bd);border-radius:4px;padding:1px 6px;}
+
+.tabbar{height:36px;background:var(--sf);border-bottom:1px solid var(--bd);display:flex;align-items:flex-end;padding:0 8px;gap:2px;flex-shrink:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
+.tabbar::-webkit-scrollbar{display:none;}
+.tab{display:flex;align-items:center;gap:6px;padding:0 11px;height:28px;background:var(--s2);border:1px solid var(--bd);border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;font-size:12px;color:var(--t2);white-space:nowrap;max-width:200px;transition:background .12s,color .12s;flex-shrink:0;position:relative;top:1px;}
+.tab:hover{background:var(--s3);}
+.tab.active{background:var(--bg);color:var(--tx);border-color:var(--b2);z-index:2;}
+.tab-lbl{overflow:hidden;text-overflow:ellipsis;max-width:140px;}
+.tab-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.tab-x{width:16px;height:16px;border-radius:50%;border:none;background:none;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .1s,color .1s;flex-shrink:0;-webkit-app-region:no-drag;padding:0;}
+.tab-x:hover{background:rgba(217,101,101,.2);color:var(--danger);}
+.tab-add{height:28px;padding:0 9px;margin-left:3px;position:relative;top:1px;background:none;border:1px dashed var(--bd);border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;color:var(--t3);transition:all .15s;flex-shrink:0;display:flex;align-items:center;-webkit-app-region:no-drag;}
+.tab-add:hover{border-color:var(--ac);color:var(--ac);}
+
+.app{display:flex;flex:1;overflow:hidden;}
+.sidebar{width:238px;min-width:238px;background:var(--sf);border-right:1px solid var(--bd);display:flex;flex-direction:column;overflow:hidden;transition:width .2s,min-width .2s;}
+.sidebar.hidden{width:0;min-width:0;border-right:none;}
+.pages{flex:1;display:flex;overflow:hidden;}
+.page{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.page.hide{display:none;}
+
+.sb-search{padding:11px 10px;border-bottom:1px solid var(--bd);}
+.sb-wrap{position:relative;}
+.sb-wrap input{width:100%;background:var(--s2);border:1px solid var(--bd);border-radius:var(--rs);padding:7px 10px 7px 30px;color:var(--tx);font-family:inherit;font-size:12.5px;outline:none;transition:border-color .2s;}
+.sb-wrap input:focus{border-color:var(--ac);}
+.sb-wrap input::placeholder{color:var(--t3);}
+.sb-ico{position:absolute;left:8px;top:50%;transform:translateY(-50%);pointer-events:none;opacity:.38;}
+.sb-lbl{padding:12px 12px 5px;font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--t3);font-weight:600;display:flex;align-items:center;justify-content:space-between;}
+.btn-ico{background:none;border:none;color:var(--t3);cursor:pointer;padding:3px;border-radius:4px;transition:background .12s,color .12s;-webkit-app-region:no-drag;display:flex;align-items:center;}
+.btn-ico:hover{background:var(--s3);color:var(--t2);}
+.topics-scroll{flex:1;overflow-y:auto;padding:2px 6px 10px;scrollbar-width:thin;scrollbar-color:var(--bd) transparent;}
+.trow{display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:var(--rs);cursor:pointer;transition:background .12s;margin-bottom:1px;}
+.trow:hover{background:var(--s2);}
+.trow.active{background:var(--s3);}
+.tc{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.tn{flex:1;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tbadge{font-size:10px;color:var(--t3);background:var(--s3);border-radius:10px;padding:1px 6px;}
+.tdel{background:none;border:none;color:var(--t3);cursor:pointer;padding:2px;border-radius:3px;opacity:0;transition:opacity .12s,color .12s;-webkit-app-region:no-drag;display:flex;align-items:center;}
+.trow:hover .tdel{opacity:1;}
+.tdel:hover{color:var(--danger);}
+.sb-foot{padding:10px 12px;border-top:1px solid var(--bd);font-size:11px;color:var(--t3);}
+.sb-foot strong{color:var(--t2);}
+
+.lib-tb{padding:9px 16px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px;background:var(--sf);flex-shrink:0;}
+.lib-title{font-family:'Playfair Display',serif;font-size:18px;font-weight:600;flex:1;}
+.lib-title .ti{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;position:relative;top:-1px;}
+.btn{font-family:inherit;padding:6px 13px;border-radius:var(--rs);border:none;cursor:pointer;font-size:12.5px;font-weight:500;transition:all .15s;display:flex;align-items:center;gap:6px;white-space:nowrap;}
+.btn-p{background:var(--ac);color:#1a1408;}
+.btn-p:hover{background:#e0b84e;}
+.btn-g{background:var(--s2);color:var(--t2);border:1px solid var(--bd);}
+.btn-g:hover{background:var(--s3);color:var(--tx);}
+.vtoggle{display:flex;gap:2px;background:var(--s2);border:1px solid var(--bd);border-radius:var(--rs);padding:2px;}
+.vbtn{background:none;border:none;color:var(--t3);cursor:pointer;padding:4px 8px;border-radius:4px;transition:all .15s;display:flex;align-items:center;}
+.vbtn.active{background:var(--s3);color:var(--tx);}
+
+.content{flex:1;overflow-y:auto;padding:16px;scrollbar-width:thin;scrollbar-color:var(--bd) transparent;}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:14px;color:var(--t3);}
+.empty-t{font-size:15px;color:var(--t2);font-weight:500;}
+.empty-s{font-size:12.5px;text-align:center;max-width:240px;line-height:1.5;}
+
+/* Grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;}
+.card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;cursor:pointer;transition:transform .15s,border-color .15s,box-shadow .15s;position:relative;}
+.card:hover{transform:translateY(-2px);border-color:var(--b2);box-shadow:0 6px 22px rgba(0,0,0,.45);}
+.cover{width:100%;aspect-ratio:.707;background:var(--s2);position:relative;overflow:hidden;border-bottom:1px solid var(--bd);}
+.cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;}
+.cover-ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;}
+.cspin{width:18px;height:18px;border:2px solid var(--b2);border-top-color:var(--ac);border-radius:50%;animation:spin .75s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.card-body{padding:8px 9px 9px;}
+.card-name{font-size:11.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px;}
+.card-meta{font-size:10.5px;color:var(--t3);}
+.card-menu{position:absolute;top:5px;right:5px;background:rgba(14,14,15,.88);border:1px solid var(--b2);color:var(--t2);cursor:pointer;padding:4px 7px;border-radius:5px;opacity:0;transition:opacity .12s;-webkit-app-region:no-drag;display:flex;align-items:center;}
+.card:hover .card-menu{opacity:1;}
+.card-menu:hover{background:var(--s3);color:var(--tx);}
+.miss-badge{position:absolute;top:4px;left:4px;background:rgba(217,101,101,.9);color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:4px;display:flex;align-items:center;gap:3px;}
+
+/* List */
+.list{display:flex;flex-direction:column;gap:3px;}
+.lrow{display:flex;align-items:center;gap:11px;padding:7px 11px;background:var(--sf);border:1px solid var(--bd);border-radius:var(--rs);cursor:pointer;transition:background .12s,border-color .12s;position:relative;}
+.lrow:hover{background:var(--s2);border-color:var(--b2);}
+.lthumb{width:30px;height:42px;background:var(--s2);border-radius:3px;overflow:hidden;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;}
+.lthumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:3px;}
+.lname{flex:1;font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.lpill{font-size:10.5px;padding:2px 7px;border-radius:10px;flex-shrink:0;}
+.lsize{font-size:11px;color:var(--t3);flex-shrink:0;width:55px;text-align:right;}
+.ldate{font-size:11px;color:var(--t3);flex-shrink:0;width:88px;text-align:right;}
+.lmenu{background:none;border:1px solid transparent;color:var(--t3);cursor:pointer;padding:3px 7px;border-radius:5px;opacity:0;transition:opacity .12s;flex-shrink:0;-webkit-app-region:no-drag;display:flex;align-items:center;}
+.lrow:hover .lmenu{opacity:1;}
+.lmenu:hover{background:var(--s3);border-color:var(--bd);color:var(--t2);}
+
+/* Reader */
+.reader-page{flex:1;display:flex;flex-direction:column;overflow:hidden;background:#18181c;}
+.rtb{padding:6px 10px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:6px;flex-shrink:0;background:var(--sf);flex-wrap:wrap;}
+.rback{background:none;border:1px solid var(--bd);color:var(--t2);cursor:pointer;font-size:12px;padding:5px 11px;border-radius:var(--rs);transition:all .15s;-webkit-app-region:no-drag;font-family:inherit;display:flex;align-items:center;gap:6px;white-space:nowrap;}
+.rback:hover{background:var(--s2);color:var(--tx);}
+.rtitle{flex:1;font-size:12px;font-weight:500;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px;min-width:40px;}
+.vb{background:none;border:1px solid var(--bd);color:var(--t2);cursor:pointer;padding:5px 8px;border-radius:5px;transition:all .15s;font-family:inherit;display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:12px;}
+.vb:hover{background:var(--s2);color:var(--tx);}
+.vb:disabled{opacity:.3;cursor:not-allowed;}
+.vsep{width:1px;height:16px;background:var(--bd);margin:0 1px;flex-shrink:0;}
+.pind{font-size:11.5px;color:var(--t3);padding:0 3px;white-space:nowrap;}
+.zlbl{font-size:11px;color:var(--t3);min-width:36px;text-align:center;}
+
+.rfind{padding:6px 10px;border-bottom:1px solid var(--bd);background:var(--sf);display:none;align-items:center;gap:8px;}
+.rfind.show{display:flex;}
+.rfind input{flex:1;background:var(--s2);border:1px solid var(--bd);border-radius:var(--rs);padding:5px 9px;color:var(--tx);font-family:inherit;font-size:12.5px;outline:none;}
+.rfind input:focus{border-color:var(--ac);}
+.finfo{font-size:11px;color:var(--t3);white-space:nowrap;}
+
+.pdfvp{flex:1;overflow:auto;background:#212125;scrollbar-width:thin;scrollbar-color:var(--b2) transparent;position:relative;}
+.pdf-pages-inner{display:flex;flex-direction:column;align-items:center;padding:16px 10px;gap:10px;}
+
+.pwrap{position:relative;flex-shrink:0;box-shadow:0 4px 24px rgba(0,0,0,.55);background:var(--s2);}
+.pwrap canvas{display:block;}
+.pwrap{user-select:text;-webkit-user-select:text;}
+.pwrap canvas,.page-loading{user-select:none;-webkit-user-select:none;}
+.page-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--s2);}
+
+
+.hllayer{
+  position:absolute;inset:0;
+  overflow:hidden;
+  pointer-events:none; 
+  z-index:1;
+}
+.hlr{
+  position:absolute;pointer-events:all;cursor:pointer;
+  border-radius:2px;opacity:.42;transition:opacity .1s;
+}
+.hlr:hover{opacity:.75;outline:1px solid rgba(255,255,255,.18);}
+
+
+.textLayer{
+  position:absolute;
+  left:0;top:0;
+  overflow:hidden;
+  line-height:1;
+  z-index:2;
+  user-select:text;-webkit-user-select:text;
+  pointer-events:none; 
+}
+
+.textLayer span,.textLayer br{
+  color:transparent;
+  position:absolute;
+  white-space:pre;
+  cursor:text;
+  transform-origin:0% 0%;
+  pointer-events:all;
+  user-select:text;-webkit-user-select:text;
+}
+.textLayer span::selection{background:rgba(212,168,67,.38);color:transparent;}
+.textLayer span::-moz-selection{background:rgba(212,168,67,.38);color:transparent;}
+
+.hl-popup{
+  position:fixed;z-index:600;
+  background:var(--s2);border:1px solid var(--b2);border-radius:10px;
+  padding:7px 10px;display:flex;align-items:center;gap:6px;
+  box-shadow:0 6px 28px rgba(0,0,0,.65);
+  opacity:0;pointer-events:none;
+  transform:translateY(8px) scale(.96);
+  transition:opacity .13s,transform .13s;
+  user-select:none;
+}
+.hl-popup.show{opacity:1;pointer-events:all;transform:translateY(0) scale(1);}
+.hl-label{font-size:10.5px;color:var(--t3);margin-right:2px;}
+.hlcb{width:18px;height:18px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .1s,border-color .1s;flex-shrink:0;}
+.hlcb:hover{transform:scale(1.2);}
+.hlcb.sel{border-color:#fff;transform:scale(1.1);}
+.hl-apply{background:var(--ac);border:none;color:#1a1408;font-family:inherit;font-size:11px;font-weight:600;padding:4px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:4px;}
+.hl-apply:hover{background:#e0b84e;}
+.hl-dismiss{background:none;border:none;color:var(--t3);cursor:pointer;padding:3px;border-radius:4px;display:flex;align-items:center;}
+.hl-dismiss:hover{color:var(--tx);}
+
+.vb.hl-mode-btn.active{background:rgba(249,224,75,.13);border-color:rgba(249,224,75,.5);color:#f9e04b;}
+
+.settings-panel{
+  position:fixed;z-index:800;
+  top:78px;right:12px;
+  width:260px;
+  background:var(--s2);border:1px solid var(--b2);border-radius:12px;
+  padding:18px 18px 14px;
+  box-shadow:0 8px 32px rgba(0,0,0,.6);
+  opacity:0;pointer-events:none;transform:translateY(-6px) scale(.97);
+  transition:opacity .15s,transform .15s;
+}
+.settings-panel.show{opacity:1;pointer-events:all;transform:translateY(0) scale(1);}
+.sp-title{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--t3);font-weight:600;margin-bottom:14px;}
+.sp-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;}
+.sp-label{font-size:12.5px;color:var(--t2);}
+.sp-controls{display:flex;align-items:center;gap:6px;}
+.sp-val{font-size:12px;color:var(--t3);min-width:32px;text-align:center;}
+.sp-btn{background:none;border:1px solid var(--bd);color:var(--t2);cursor:pointer;width:26px;height:26px;border-radius:5px;display:flex;align-items:center;justify-content:center;transition:all .12s;flex-shrink:0;}
+.sp-btn:hover{background:var(--s3);color:var(--tx);}
+.sp-divider{height:1px;background:var(--bd);margin:12px 0;}
+.sp-swatch-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;}
+.sp-swatch{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:transform .1s,border-color .1s;}
+.sp-swatch:hover{transform:scale(1.15);}
+.sp-swatch.sel{border-color:#fff;}
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:1000;opacity:0;pointer-events:none;transition:opacity .2s;}
+.ov.show{opacity:1;pointer-events:all;}
+.modal{background:var(--s2);border:1px solid var(--b2);border-radius:14px;padding:24px;width:380px;box-shadow:0 20px 60px rgba(0,0,0,.6);transform:translateY(8px);transition:transform .2s;}
+.ov.show .modal{transform:translateY(0);}
+.mt{font-family:'Playfair Display',serif;font-size:18px;font-weight:600;margin-bottom:16px;}
+.fg{margin-bottom:14px;}
+.fl{font-size:11.5px;color:var(--t2);margin-bottom:5px;display:block;font-weight:500;}
+.fi,.fsel{width:100%;background:var(--s3);border:1px solid var(--b2);border-radius:var(--rs);padding:8px 11px;color:var(--tx);font-family:inherit;font-size:13.5px;outline:none;transition:border-color .2s;}
+.fi:focus,.fsel:focus{border-color:var(--ac);}
+.fsel option{background:var(--s3);}
+.cpicker{display:flex;gap:7px;flex-wrap:wrap;}
+.csw{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:transform .12s,border-color .12s;}
+.csw:hover{transform:scale(1.15);}
+.csw.sel{border-color:#fff;}
+.mact{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
+
+.ddm{position:fixed;background:var(--s2);border:1px solid var(--b2);border-radius:var(--rs);padding:4px;z-index:2000;min-width:210px;box-shadow:0 8px 30px rgba(0,0,0,.55);opacity:0;pointer-events:none;transform:scale(.96) translateY(-4px);transition:opacity .12s,transform .12s;}
+.ddm.show{opacity:1;pointer-events:all;transform:scale(1) translateY(0);}
+.ddi{padding:7px 11px;border-radius:5px;cursor:pointer;font-size:12.5px;display:flex;align-items:center;gap:8px;transition:background .1s;color:var(--t2);}
+.ddi:hover{background:var(--s3);color:var(--tx);}
+.ddi.danger{color:var(--danger);}
+.ddi.danger:hover{background:rgba(217,101,101,.1);}
+.ddsep{height:1px;background:var(--bd);margin:3px 2px;}
+.ddsec{padding:5px 11px 2px;font-size:9.5px;letter-spacing:1px;text-transform:uppercase;color:var(--t3);font-weight:600;}
+
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%) translateY(10px);background:var(--s3);border:1px solid var(--b2);border-radius:8px;padding:8px 15px;font-size:12.5px;color:var(--t2);opacity:0;transition:all .22s;z-index:3000;pointer-events:none;white-space:nowrap;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--b2);border-radius:10px;}
+</style>
+</head>
+<body>
+
+<!-- SVG icon sprite -->
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-home" viewBox="0 0 16 16"><path d="M2 8.5 8 2l6 6.5V14h-4v-3.5H6V14H2z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3V14.5h-9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.5 1.5v3h3" fill="none" stroke="currentColor" stroke-width="1.3"/><line x1="5.5" y1="7" x2="10.5" y2="7" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".5"/><line x1="5.5" y1="9.5" x2="10.5" y2="9.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".5"/><line x1="5.5" y1="12" x2="8.5" y2="12" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.5 5h5l1.5 1.5h7V14h-13.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><line x1="9.7" y1="9.7" x2="14" y2="14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><line x1="8" y1="2.5" x2="8" y2="13.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><line x1="2.5" y1="8" x2="13.5" y2="8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="2" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="2" y="9" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+  <symbol id="i-list" viewBox="0 0 16 16"><line x1="2" y1="4.5" x2="14" y2="4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="2" y1="11.5" x2="14" y2="11.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 16 16"><circle cx="4" cy="8" r="1.3" fill="currentColor"/><circle cx="8" cy="8" r="1.3" fill="currentColor"/><circle cx="12" cy="8" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><line x1="3.5" y1="3.5" x2="12.5" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><line x1="12.5" y1="3.5" x2="3.5" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-back" viewBox="0 0 16 16"><polyline points="10,3 4,8 10,13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 16 16"><polyline points="10,3 4,8 10,13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-next" viewBox="0 0 16 16"><polyline points="6,3 12,8 6,13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-zin" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4" fill="none" stroke="currentColor" stroke-width="1.3"/><line x1="9.7" y1="9.7" x2="14" y2="14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="4.5" y1="6.5" x2="8.5" y2="6.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="6.5" y1="4.5" x2="6.5" y2="8.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-zout" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4" fill="none" stroke="currentColor" stroke-width="1.3"/><line x1="9.7" y1="9.7" x2="14" y2="14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="4.5" y1="6.5" x2="8.5" y2="6.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-find" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4" fill="none" stroke="currentColor" stroke-width="1.3"/><line x1="9.7" y1="9.7" x2="14" y2="14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="5" y1="6.5" x2="8" y2="6.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity=".6"/><line x1="6.5" y1="5" x2="6.5" y2="8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" opacity=".6"/></symbol>
+  <symbol id="i-hl" viewBox="0 0 16 16"><rect x="2.5" y="11" width="11" height="3" rx="1" fill="currentColor" opacity=".35"/><path d="M5.5 10.5 8 3l2.5 7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.2" y1="8" x2="9.8" y2="8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><line x1="2.5" y1="4.5" x2="13.5" y2="4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M5.5 4.5V3h5v1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M5 4.5l.5 9h5l.5-9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 16 16"><path d="M10.5 2.5l3 3L5 14H2v-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><line x1="8.5" y1="4.5" x2="11.5" y2="7.5" stroke="currentColor" stroke-width="1.1" opacity=".5"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2 1.5 14h13z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><line x1="8" y1="6.5" x2="8" y2="10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="12" r=".9" fill="currentColor"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M3.4 12.6l.9-.9M11.7 4.3l.9-.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-hlmode" viewBox="0 0 16 16"><rect x="2" y="11.5" width="12" height="2.5" rx="1" fill="currentColor" opacity=".4"/><path d="M5 11 8 3l3 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6" y1="8.5" x2="10" y2="8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="13" cy="4" r="2" fill="var(--ac)" opacity=".9"/></symbol>
+  <symbol id="i-font-up" viewBox="0 0 16 16"><path d="M2 13 6.5 3 11 13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="3.5" y1="10" x2="9.5" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M13 6v6M10 9h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-font-dn" viewBox="0 0 16 16"><path d="M2 13 6.5 3 11 13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="3.5" y1="10" x2="9.5" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M10 9h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+</svg>
+
+<!-- Titlebar -->
+<div class="tbar" data-tauri-drag-region>
+  <span class="logo">Folio</span>
+  <span class="tbar-dot">·</span>
+  <span class="tbar-ctx" id="tbar-ctx">Library</span>
+  <span class="tbar-ver">v0.3</span>
+</div>
+
+<!-- Tabs -->
+<div class="tabbar" id="tabbar">
+  <button class="tab-add" id="tab-add" title="Open PDF in new tab">
+    <svg width="13" height="13"><use href="#i-plus"/></svg>
+  </button>
+</div>
+
+<div class="app">
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sb-search">
+      <div class="sb-wrap">
+        <svg class="sb-ico" width="13" height="13"><use href="#i-search"/></svg>
+        <input type="text" id="sinput" placeholder="Search PDFs…">
+      </div>
+    </div>
+    <div class="sb-lbl">Topics
+      <button class="btn-ico" id="btn-nt"><svg width="14" height="14"><use href="#i-plus"/></svg></button>
+    </div>
+    <div class="topics-scroll" id="topiclist"></div>
+    <div class="sb-foot" id="sbfoot">0 PDFs</div>
+  </div>
+
+  <!-- Pages -->
+  <div class="pages" id="pages">
+    <!-- Library -->
+    <div class="page" id="page-__lib__">
+      <div class="lib-tb">
+        <div class="lib-title" id="libtitle">All PDFs</div>
+        <button class="btn btn-g" id="btn-import">
+          <svg width="12" height="12"><use href="#i-plus"/></svg> Add PDFs
+        </button>
+        <div class="vtoggle">
+          <button class="vbtn active" id="vg"><svg width="14" height="14"><use href="#i-grid"/></svg></button>
+          <button class="vbtn" id="vl"><svg width="14" height="14"><use href="#i-list"/></svg></button>
+        </div>
+      </div>
+      <div class="content" id="content">
+        <div class="empty" id="empty">
+          <svg width="52" height="52" opacity=".18"><use href="#i-folder"/></svg>
+          <div class="empty-t">No PDFs yet</div>
+          <div class="empty-s">Click "Add PDFs" or drag & drop files here</div>
+        </div>
+        <div class="grid" id="pgrid" style="display:none"></div>
+        <div class="list" id="plist" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Highlight popup -->
+<div class="hl-popup" id="hl-popup">
+  <svg width="12" height="12" style="opacity:.5"><use href="#i-hl"/></svg>
+  <span class="hl-label">Highlight</span>
+  <div class="hlcb sel" style="background:#f9e04b" data-c="#f9e04b"></div>
+  <div class="hlcb" style="background:#7de87d" data-c="#7de87d"></div>
+  <div class="hlcb" style="background:#7dc3f9" data-c="#7dc3f9"></div>
+  <div class="hlcb" style="background:#f97d7d" data-c="#f97d7d"></div>
+  <div class="hlcb" style="background:#d4a843" data-c="#d4a843"></div>
+  <button class="hl-apply" id="hl-apply">Apply</button>
+  <button class="hl-dismiss" id="hl-dismiss"><svg width="10" height="10"><use href="#i-x"/></svg></button>
+</div>
+
+<!-- Settings panel -->
+<div class="settings-panel" id="settings-panel">
+  <div class="sp-title">View Settings</div>
+  <div class="sp-row">
+    <span class="sp-label">Page zoom</span>
+    <div class="sp-controls">
+      <button class="sp-btn" id="sp-zo"><svg width="12" height="12"><use href="#i-zout"/></svg></button>
+      <span class="sp-val" id="sp-zoom-val">140%</span>
+      <button class="sp-btn" id="sp-zi"><svg width="12" height="12"><use href="#i-zin"/></svg></button>
+    </div>
+  </div>
+  <div class="sp-row">
+    <span class="sp-label">UI font size</span>
+    <div class="sp-controls">
+      <button class="sp-btn" id="sp-fu"><svg width="12" height="12"><use href="#i-font-dn"/></svg></button>
+      <span class="sp-val" id="sp-font-val">14px</span>
+      <button class="sp-btn" id="sp-fd"><svg width="12" height="12"><use href="#i-font-up"/></svg></button>
+    </div>
+  </div>
+  <div class="sp-divider"></div>
+  <div class="sp-row" style="align-items:flex-start;flex-direction:column;gap:8px">
+    <span class="sp-label">Default highlight color</span>
+    <div class="sp-swatch-row" id="sp-hl-swatches"></div>
+  </div>
+</div>
+
+<!-- Dropdown -->
+<div class="ddm" id="ddm"></div>
+
+<!-- Modal: Topic -->
+<div class="ov" id="mtopic">
+  <div class="modal">
+    <div class="mt">New Topic</div>
+    <div class="fg"><label class="fl">Name</label><input class="fi" id="tname" type="text" placeholder="e.g. Research Papers"></div>
+    <div class="fg"><label class="fl">Color</label><div class="cpicker" id="cpicker"></div></div>
+    <div class="mact">
+      <button class="btn btn-g" id="btn-ct">Cancel</button>
+      <button class="btn btn-p" id="btn-st">Create Topic</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  async function _tauriBootstrap() {
+    const { invoke } = await import('https://unpkg.com/@tauri-apps/api@2/core');
+    window.__TAURI__ = { core: { invoke } };
+    window.dispatchEvent(new Event('tauri-ready'));
+  }
+  _tauriBootstrap();
+</script>
+<script src="renderer.js" defer></script>
+</body>
+</html>

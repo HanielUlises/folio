@@ -1,0 +1,19 @@
+{
+  "name": "folio-pdf",
+  "version": "0.4.0",
+  "description": "A clean PDF reader and organiser — Tauri + Rust backend, TypeScript frontend",
+  "scripts": {
+    "build:frontend": "tsc --project tsconfig.renderer.json",
+    "dev:frontend":   "tsc --project tsconfig.renderer.json --watch",
+    "dev":            "npm run build:frontend && tauri dev",
+    "build":          "npm run build:frontend && tauri build",
+    "typecheck":      "tsc --noEmit --project tsconfig.renderer.json"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript":      "^5.4.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  }
+}

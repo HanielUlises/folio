@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "outDir": "src",
+    "rootDir": "src",
+    "module": "None",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "sourceMap": true,
+    "inlineSources": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/renderer.ts"],
+  "exclude": ["node_modules"]
+}
