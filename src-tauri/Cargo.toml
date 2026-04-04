@@ -1,8 +1,8 @@
 [package]
 name = "folio"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
-description = "Folio — a clean PDF reader and organiser"
+description = "Folio — a clean PDF reader and organiser (Rust PDF engine)"
 default-run = "folio"
 
 [lib]
@@ -17,14 +17,30 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri          = { version = "2", features = ["protocol-asset"] }
+# ── Tauri v2 ────────────────────────────────────────────────────────────────
+tauri             = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs     = "2"
 tauri-plugin-shell  = "2"
+
+# ── PDF engine: pdfium-render ───────────────────────────────────────────────
+# Uses Chromium's Pdfium via pre-built binaries (no system lib needed).
+# Feature "thread_safe" enables Send+Sync on the Pdfium handle so we can
+# wrap it in Arc<Mutex<…>> and share across Tauri commands.
+pdfium-render = { version = "0.8", features = ["thread_safe", "image"] }
+
+# ── Image encoding ───────────────────────────────────────────────────────────
+image        = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64       = "0.22"
+
+# ── Serialisation ───────────────────────────────────────────────────────────
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
-base64      = "0.22"
+
+# ── Utility ─────────────────────────────────────────────────────────────────
 dirs        = "5"
+uuid        = { version = "1", features = ["v4"] }
+once_cell   = "1"
 
 [profile.release]
 codegen-units = 1
