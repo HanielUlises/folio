@@ -1,21 +1,18 @@
 {
   "compilerOptions": {
-    "outDir": "src",
-    "rootDir": "src",
-    "module": "None",
     "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitReturns": true,
-    "noFallthroughCasesInSwitch": true,
-    "exactOptionalPropertyTypes": true,
-    "moduleResolution": "node",
-    "esModuleInterop": true,
+    "noImplicitAny": true,
+    "outDir": "./src",
+    "rootDir": "./src",
+    "declaration": false,
     "sourceMap": true,
-    "inlineSources": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true
   },
-  "include": ["src/renderer.ts"],
-  "exclude": ["node_modules"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "src-tauri"]
 }
