@@ -1,7 +1,7 @@
 {
   "name": "folio-pdf",
-  "version": "0.4.0",
-  "description": "A clean PDF reader and organiser — Tauri + Rust backend, TypeScript frontend",
+  "version": "0.5.0",
+  "description": "Folio — clean PDF reader (Tauri v2 + pdfium-render Rust engine)",
   "scripts": {
     "build:frontend": "tsc --project tsconfig.renderer.json",
     "dev:frontend":   "tsc --project tsconfig.renderer.json --watch",
