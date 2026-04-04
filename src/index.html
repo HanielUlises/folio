@@ -397,14 +397,16 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--tx);displ
 
 <div class="toast" id="toast"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script>
-  async function _tauriBootstrap() {
-    const { invoke } = await import('https://unpkg.com/@tauri-apps/api@2/core');
-    window.__TAURI__ = { core: { invoke } };
-    window.dispatchEvent(new Event('tauri-ready'));
-  }
-  _tauriBootstrap();
+<script type="module">
+  // Tauri v2: __TAURI__ is injected by the webview automatically.
+  // We also expose the event listener for drag-drop.
+  import { invoke }  from '@tauri-apps/api/core';
+  import { listen }  from '@tauri-apps/api/event';
+  window.__TAURI__ = {
+    core:  { invoke },
+    event: { listen },
+  };
+  window.dispatchEvent(new Event('tauri-ready'));
 </script>
 <script src="renderer.js" defer></script>
 </body>

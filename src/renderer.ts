@@ -2,83 +2,37 @@
 /// <reference lib="dom.iterable" />
 'use strict';
 
-// ── Shared types (inlined — no import needed at runtime) ──────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//  Folio — renderer.ts
+//  Frontend for the Tauri v2 PDF reader.
+//
+//  ALL PDF rendering, text extraction and thumbnail generation is done by
+//  the Rust backend via Tauri commands.  This file contains ZERO pdf.js
+//  calls.  Each opened tab has:
+//    • A session_id returned by pdf_open()
+//    • Lazily rendered pages (IntersectionObserver)
+//    • A transparent text layer (absolute <span> elements) for selection
+//    • A highlight layer (absolute <div> elements)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 interface Topic         { id: string; name: string; color: string; }
 interface PdfEntry      { id: string; path: string; name: string; size: number; added: number; topicId: string | null; exists: boolean; }
 interface HighlightRect { x: number; y: number; w: number; h: number; }
 interface PdfHighlight  { id: string; page: number; rects: HighlightRect[]; color: string; }
 interface AppData       { topics: Topic[]; pdfs: PdfEntry[]; highlights: Record<string, PdfHighlight[]>; }
 interface OpenedFile    { path: string; name: string; size: number; added: number; }
-// Tauri v2 invoke helper — typed thin wrapper around __TAURI__.core.invoke
-declare const __TAURI__: {
-  core: { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> };
-};
-interface Window { __TAURI__: typeof __TAURI__; }
 
-const invoke = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
-  __TAURI__.core.invoke<T>(cmd, args);
-
-// ─── pdf.js type stubs ────────────────────────────────────────────────────────
-declare const pdfjsLib: {
-  GlobalWorkerOptions: { workerSrc: string };
-  getDocument(opts: Record<string, unknown>): { promise: Promise<PdfDoc> };
-};
-
-interface Viewport {
-  width: number;
-  height: number;
-  scale: number;
-  transform: number[];
+interface TextSpan {
+  text: string;
+  x: number; y: number; w: number; h: number;
+  font_size: number;
 }
 
-interface TextItem {
-  str: string;
-  transform: number[];
-  width: number;
-  height: number;
-  dir: string;
-  fontName?: string;
-}
-
-interface TextContent {
-  items: TextItem[];
-}
-
-interface RenderTask {
-  promise: Promise<void>;
-  cancel(): void;
-}
-
-interface PdfPage {
-  getViewport(opts: { scale: number }): Viewport;
-  render(opts: { canvasContext: CanvasRenderingContext2D; viewport: Viewport }): RenderTask;
-  getTextContent(): Promise<TextContent>;
-}
-
-interface PdfDoc {
-  numPages: number;
-  getPage(n: number): Promise<PdfPage>;
-  destroy(): void;
-}
-
-// ─── Reader state ─────────────────────────────────────────────────────────────
-interface ReaderState {
-  pdfDoc:      PdfDoc;
-  pdfId:       string;
-  pageCount:   number;
-  currentPage: number;
-  zoom:        number;
-  hlColor:     string;
-  selData:     SelectionData | null;
-  sMatches:    HTMLElement[];
-  sIdx:        number;
-  io:          IntersectionObserver | null;
-}
-
-interface SelectionData {
-  pageNum: number;
-  rects:   HighlightRect[];
-  tid:     string;
+interface DocInfo {
+  session_id: string;
+  page_count: number;
 }
 
 interface TabMeta {
@@ -89,84 +43,129 @@ interface TabMeta {
   topicColor: string | null;
 }
 
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+interface ReaderState {
+  sessionId:   string;
+  pdfId:       string;
+  pageCount:   number;
+  currentPage: number;
+  zoom:        number;             // CSS zoom factor (1.0 = 100 %)
+  hlColor:     string;
+  selData:     SelectionData | null;
+  sMatches:    HTMLElement[];
+  sIdx:        number;
+  io:          IntersectionObserver | null;
+  // page sizes in points (lazy, filled on first render)
+  pageSizes:   Array<[number, number] | null>;
+}
 
-const svgI = (id: string, w = 14, h = 14): string =>
-  `<svg width="${w}" height="${h}" style="flex-shrink:0;display:inline-block"><use href="#i-${id}"/></svg>`;
+interface SelectionData {
+  pageNum: number;       // 1-based
+  rects:   HighlightRect[];
+}
 
+// Tauri v2 invoke
+declare const __TAURI__: {
+  core:    { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> };
+  event:   { listen<T>(event: string, handler: (e: { payload: T }) => void): Promise<() => void> };
+};
+
+const invoke = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+  __TAURI__.core.invoke<T>(cmd, args);
+
+// ─── Tiny DOM helpers ─────────────────────────────────────────────────────────
 const $   = (id: string): HTMLElement | null => document.getElementById(id);
-const gId = (): string => Math.random().toString(36).slice(2, 11);
+const gId = (): string => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 11);
 const fmtSz = (b: number): string =>
   b < 1024 ? b + 'B' : b < 1048576 ? (b / 1024).toFixed(0) + 'KB' : (b / 1048576).toFixed(1) + 'MB';
 const fmtDt = (ts: number): string =>
   new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 const esc = (s: unknown): string =>
-  String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const svgI = (id: string, w = 14, h = 14): string =>
+  `<svg width="${w}" height="${h}" style="flex-shrink:0;display:inline-block"><use href="#i-${id}"/></svg>`;
 
 function toast(msg: string): void {
-  const t = $('toast');
-  if (!t) return;
-  t.textContent = msg;
-  t.classList.add('show');
+  const t = $('toast'); if (!t) return;
+  t.textContent = msg; t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-let appState: AppData = { topics: [], pdfs: [], highlights: {} };
+// ─── Global state ─────────────────────────────────────────────────────────────
+let appState: AppData       = { topics: [], pdfs: [], highlights: {} };
 let activeTopic: string | null = null;
 let viewMode: 'grid' | 'list' = 'grid';
-let searchQ = '';
-let activeTabId = '__lib__';
-let ddPdf: PdfEntry | null = null;
+let searchQ   = '';
+let activeTabId               = '__lib__';
+let ddPdf: PdfEntry | null    = null;
 let pendingAssignId: string | null = null;
 let tColor = '#d4a843';
 
-const tabMeta   = new Map<string, TabMeta>();
+const tabMeta     = new Map<string, TabMeta>();
 const tabOrder: string[] = [];
-const readers   = new Map<string, ReaderState>();
-const coverCache   = new Map<string, string | null>();
+const readers     = new Map<string, ReaderState>();
+const coverCache  = new Map<string, string | null>();    // pdfId → data-url | null
 const coverLoading = new Set<string>();
 
-const COLORS = ['#d4a843','#6eb5d4','#7dcf8c','#d46e6e','#b57dcf','#cf9c7d','#7db8cf','#cfcf7d','#cf7da8','#7dcfcf'];
-const HL_COLORS_SP = ['#f9e04b','#7de87d','#7dc3f9','#f97d7d','#d4a843'];
-let defaultHlColor = '#f9e04b';
-let globalFontSize = 14;
+const COLORS        = ['#d4a843','#6eb5d4','#7dcf8c','#d46e6e','#b57dcf','#cf9c7d','#7db8cf','#cfcf7d','#cf7da8','#7dcfcf'];
+const HL_COLORS_SP  = ['#f9e04b','#7de87d','#7dc3f9','#f97d7d','#d4a843'];
+let defaultHlColor  = '#f9e04b';
+let globalFontSize  = 14;
 
-let hlModeActive = false;
+let hlModeActive    = false;
 let hlModeTid: string | null = null;
-let selTid: string | null = null;
+let selTid: string | null    = null;
 let settingsTid: string | null = null;
 
+// ─── Bootstrap ───────────────────────────────────────────────────────────────
+
 async function boot(): Promise<void> {
-  appState             = await invoke<AppData>('get_data');
-  appState.topics      = appState.topics     ?? [];
-  appState.pdfs        = appState.pdfs       ?? [];
-  appState.highlights  = appState.highlights ?? {};
+  appState            = await invoke<AppData>('get_data');
+  appState.topics     = appState.topics    ?? [];
+  appState.pdfs       = appState.pdfs      ?? [];
+  appState.highlights = appState.highlights ?? {};
+
   tabMeta.set('__lib__', { id: '__lib__', type: 'lib', label: 'Library', topicColor: null });
   tabOrder.push('__lib__');
-  renderTabs();
-  render();
+  renderTabs(); render();
   checkFiles();
+
+  // Listen for drag-and-drop events emitted by the Rust backend
+  await __TAURI__.event.listen<OpenedFile[]>('folio-drop', async (event) => {
+    const files = event.payload;
+    if (!files.length) return;
+    const toOpen: PdfEntry[] = [];
+    let added = 0;
+    for (const f of files) {
+      let pdf = appState.pdfs.find(p => p.path === f.path);
+      if (!pdf) {
+        pdf = {
+          id: gId(), path: f.path, name: f.name,
+          size: f.size, added: f.added,
+          topicId: (activeTopic && activeTopic !== '__u') ? activeTopic : null,
+          exists: true,
+        };
+        appState.pdfs.push(pdf); added++;
+      }
+      toOpen.push(pdf);
+    }
+    if (added > 0) { await save(); render(); toast(`Added ${added} PDF${added !== 1 ? 's' : ''}`); }
+    toOpen.forEach(p => openPdfTab(p));
+  });
 }
 
-async function save(): Promise<void> { await invoke<boolean>('save_data', { data: appState }); }
+async function save(): Promise<void> {
+  await invoke<boolean>('save_data', { data: appState });
+}
+
+// ─── Library thumbnails ───────────────────────────────────────────────────────
+//
+// Thumbnails are rendered entirely in Rust (pdfium) and returned as data-URLs.
 
 async function loadCover(pdf: PdfEntry): Promise<void> {
   if (coverCache.has(pdf.id) || coverLoading.has(pdf.id)) return;
   coverLoading.add(pdf.id);
   try {
-    const url  = await invoke<string>('get_folio_url', { path: pdf.path });
-    const doc  = await pdfjsLib.getDocument({ url, disableAutoFetch: false, disableStream: false }).promise;
-    const page = await doc.getPage(1);
-    const scale = 240 / page.getViewport({ scale: 1 }).width;
-    const vp   = page.getViewport({ scale });
-    const cv   = document.createElement('canvas');
-    cv.width   = Math.floor(vp.width);
-    cv.height  = Math.floor(vp.height);
-    const ctx  = cv.getContext('2d');
-    if (ctx) await page.render({ canvasContext: ctx, viewport: vp }).promise;
-    doc.destroy();
-    const dataUrl = cv.toDataURL('image/jpeg', 0.82);
+    const dataUrl = await invoke<string>('pdf_thumbnail', { path: pdf.path, thumbWidth: 240 });
     coverCache.set(pdf.id, dataUrl);
     stampCover(pdf.id, dataUrl);
   } catch {
@@ -180,12 +179,19 @@ async function loadCover(pdf: PdfEntry): Promise<void> {
 function stampCover(pdfId: string, url: string | null): void {
   const ph = document.getElementById('cph-' + pdfId);
   if (ph) {
-    if (url) { const img = document.createElement('img'); img.src = url; ph.parentElement?.appendChild(img); ph.remove(); }
-    else { ph.innerHTML = `<svg width="26" height="26" opacity=".18"><use href="#i-doc"/></svg>`; ph.querySelector('.cspin')?.remove(); }
+    if (url) {
+      const img = document.createElement('img'); img.src = url;
+      ph.parentElement?.appendChild(img); ph.remove();
+    } else {
+      ph.innerHTML = `<svg width="26" height="26" opacity=".18"><use href="#i-doc"/></svg>`;
+      ph.querySelector('.cspin')?.remove();
+    }
   }
   const lt = document.getElementById('lt-' + pdfId);
   if (lt && url) { lt.innerHTML = ''; const img = document.createElement('img'); img.src = url; lt.appendChild(img); }
 }
+
+// ─── Tabs ─────────────────────────────────────────────────────────────────────
 
 function renderTabs(): void {
   const bar = $('tabbar'); if (!bar) return;
@@ -203,8 +209,12 @@ function renderTabs(): void {
         : svgI('doc', 13, 13)
       }<span class="tab-lbl" title="${esc(m.label)}">${esc(m.label)}</span><button class="tab-x">${svgI('x', 9, 9)}</button>`;
     }
-    el.addEventListener('click', e => { if ((e.target as HTMLElement).closest('.tab-x')) return; switchTab(tid); });
-    if (m.type !== 'lib') el.querySelector('.tab-x')?.addEventListener('click', e => { e.stopPropagation(); closeTab(tid); });
+    el.addEventListener('click', e => {
+      if ((e.target as HTMLElement).closest('.tab-x')) return;
+      switchTab(tid);
+    });
+    if (m.type !== 'lib')
+      el.querySelector('.tab-x')?.addEventListener('click', e => { e.stopPropagation(); closeTab(tid); });
     bar.insertBefore(el, addBtn);
   });
 }
@@ -214,25 +224,32 @@ function switchTab(tid: string): void {
   document.querySelectorAll('.page').forEach(p => p.classList.add('hide'));
   $('page-' + tid)?.classList.remove('hide');
   $('sidebar')?.classList.toggle('hidden', tid !== '__lib__');
-  const m = tabMeta.get(tid);
-  const ctx = $('tbar-ctx'); if (ctx) ctx.textContent = m ? (m.type === 'lib' ? 'Library' : m.label) : '';
+  const m   = tabMeta.get(tid);
+  const ctx = $('tbar-ctx');
+  if (ctx) ctx.textContent = m ? (m.type === 'lib' ? 'Library' : m.label) : '';
   renderTabs();
   (document.querySelector('.tab.active') as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
-function closeTab(tid: string): void {
+async function closeTab(tid: string): Promise<void> {
   const idx = tabOrder.indexOf(tid); if (idx < 0) return;
   tabOrder.splice(idx, 1); tabMeta.delete(tid);
   const r = readers.get(tid);
-  r?.io?.disconnect(); r?.pdfDoc?.destroy();
+  if (r) {
+    r.io?.disconnect();
+    await invoke('pdf_close', { sessionId: r.sessionId }).catch(() => {});
+  }
   readers.delete(tid);
   $('page-' + tid)?.remove();
   switchTab(tabOrder[Math.max(0, idx - 1)] ?? '__lib__');
 }
 
 function openPdfTab(pdf: PdfEntry): void {
-  for (const [tid, m] of tabMeta) { if (m.pdfId === pdf.id) { switchTab(tid); return; } }
-  const tid = 'r_' + gId();
+  // Re-use existing tab if already open
+  for (const [tid, m] of tabMeta) {
+    if (m.pdfId === pdf.id) { switchTab(tid); return; }
+  }
+  const tid   = 'r_' + gId();
   const topic = appState.topics.find(t => t.id === pdf.topicId);
   tabMeta.set(tid, { id: tid, type: 'reader', pdfId: pdf.id, label: pdf.name, topicColor: topic?.color ?? null });
   tabOrder.push(tid);
@@ -247,11 +264,11 @@ function openPdfTab(pdf: PdfEntry): void {
       <span class="pind" id="pind-${tid}">— / —</span>
       <button class="vb" data-a="next" data-tid="${tid}">${svgI('next', 12, 12)}</button>
       <div class="vsep"></div>
-      <button class="vb" data-a="zo" data-tid="${tid}">${svgI('zout', 13, 13)}</button>
+      <button class="vb" data-a="zo"   data-tid="${tid}">${svgI('zout', 13, 13)}</button>
       <span class="zlbl" id="zlbl-${tid}">140%</span>
-      <button class="vb" data-a="zi" data-tid="${tid}">${svgI('zin', 13, 13)}</button>
+      <button class="vb" data-a="zi"   data-tid="${tid}">${svgI('zin', 13, 13)}</button>
       <div class="vsep"></div>
-      <button class="vb" data-a="fs" data-tid="${tid}" title="Find in document">Search…</button>
+      <button class="vb" data-a="fs"     data-tid="${tid}" title="Find in document">Search…</button>
       <button class="vb hl-mode-btn" data-a="hlmode" data-tid="${tid}" title="Highlight mode">${svgI('hlmode', 14, 14)}</button>
       <div class="vsep"></div>
       <button class="vb" data-a="settings" data-tid="${tid}" title="Settings">${svgI('settings', 13, 13)}</button>
@@ -273,21 +290,22 @@ function openPdfTab(pdf: PdfEntry): void {
     </div>`;
 
   $('pages')?.appendChild(page);
+
   page.querySelector('.rback')?.addEventListener('click', () => switchTab('__lib__'));
   page.querySelectorAll<HTMLElement>('[data-a]').forEach(btn => {
     btn.addEventListener('click', e => {
-      const a = (e.currentTarget as HTMLElement).dataset['a'];
-      const t = (e.currentTarget as HTMLElement).dataset['tid'] ?? '';
-      if      (a === 'prev')     rPrev(t);
-      else if (a === 'next')     rNext(t);
-      else if (a === 'zi')       rZoom(t, 0.2);
-      else if (a === 'zo')       rZoom(t, -0.2);
-      else if (a === 'fs')       toggleFind(t);
-      else if (a === 'hlmode')   toggleHlMode(t);
-      else if (a === 'settings') toggleSettings(t);
-      else if (a === 'sp')       navFind(t, -1);
-      else if (a === 'sn')       navFind(t, 1);
-      else if (a === 'sc')       closeFind(t);
+      const a   = (e.currentTarget as HTMLElement).dataset['a'];
+      const tid = (e.currentTarget as HTMLElement).dataset['tid'] ?? '';
+      if      (a === 'prev')     rPrev(tid);
+      else if (a === 'next')     rNext(tid);
+      else if (a === 'zi')       rZoom(tid, 0.2);
+      else if (a === 'zo')       rZoom(tid, -0.2);
+      else if (a === 'fs')       toggleFind(tid);
+      else if (a === 'hlmode')   toggleHlMode(tid);
+      else if (a === 'settings') toggleSettings(tid);
+      else if (a === 'sp')       navFind(tid, -1);
+      else if (a === 'sn')       navFind(tid, 1);
+      else if (a === 'sc')       closeFind(tid);
     });
   });
   ($('rsi-' + tid) as HTMLInputElement | null)?.addEventListener('input', e =>
@@ -297,87 +315,195 @@ function openPdfTab(pdf: PdfEntry): void {
   loadReaderPdf(tid, pdf);
 }
 
+// ─── Reader — open & scaffold ─────────────────────────────────────────────────
+
 async function loadReaderPdf(tid: string, pdf: PdfEntry): Promise<void> {
   const vpi = $('vpi-' + tid); if (!vpi) return;
+
   const exists = await invoke<boolean>('check_exists', { path: pdf.path });
   if (!exists) {
     vpi.innerHTML = `<div style="padding:30px;color:var(--danger);display:flex;align-items:center;gap:8px">${svgI('warn', 16, 16)} File not found: <span style="opacity:.5;font-size:11px">${esc(pdf.path)}</span></div>`;
     return;
   }
+
   try {
-    const folioUrl = await invoke<string>('get_folio_url', { path: pdf.path });
-    const pdfDoc = await pdfjsLib.getDocument({
-      url: folioUrl, disableAutoFetch: false, disableStream: false,
-      cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/', cMapPacked: true,
-    }).promise;
-    const pageCount = pdfDoc.numPages;
-    readers.set(tid, { pdfDoc, pdfId: pdf.id, pageCount, currentPage: 1, zoom: 1.4, hlColor: defaultHlColor, selData: null, sMatches: [], sIdx: 0, io: null });
+    // 1. Ask Rust to open the document and get back a session_id + page_count
+    const info = await invoke<DocInfo>('pdf_open', { path: pdf.path });
+
+    // 2. Store reader state
+    const state: ReaderState = {
+      sessionId:   info.session_id,
+      pdfId:       pdf.id,
+      pageCount:   info.page_count,
+      currentPage: 1,
+      zoom:        1.4,
+      hlColor:     defaultHlColor,
+      selData:     null,
+      sMatches:    [],
+      sIdx:        0,
+      io:          null,
+      pageSizes:   new Array(info.page_count).fill(null),
+    };
+    readers.set(tid, state);
     updateNav(tid);
+
+    // 3. Build page placeholder elements (rendered lazily via IntersectionObserver)
     vpi.innerHTML = '';
-    for (let n = 1; n <= pageCount; n++) {
-      const pg = await pdfDoc.getPage(n);
-      const r  = readers.get(tid); if (!r) return;
-      const vp = pg.getViewport({ scale: r.zoom });
+    for (let n = 1; n <= info.page_count; n++) {
       const wrap = document.createElement('div');
-      wrap.className = 'pwrap'; wrap.dataset['page'] = String(n);
-      wrap.style.width  = Math.floor(vp.width)  + 'px';
-      wrap.style.height = Math.floor(vp.height) + 'px';
+      wrap.className    = 'pwrap';
+      wrap.dataset['page'] = String(n);
+
+      // We need at least a rough size for the placeholder so the scroll height
+      // is correct before rendering.  Use A4 aspect ratio as default.
+      // Actual size is filled in when the page is first rendered.
+      const estW = Math.floor(595 * state.zoom);
+      const estH = Math.floor(842 * state.zoom);
+      wrap.style.width  = estW + 'px';
+      wrap.style.height = estH + 'px';
+
       const ph = document.createElement('div'); ph.className = 'page-loading';
       ph.innerHTML = `<div class="cspin" style="width:16px;height:16px;border-width:1.5px"></div>`;
       wrap.appendChild(ph);
-      const hl = document.createElement('div'); hl.className = 'hllayer'; hl.dataset['page'] = String(n); wrap.appendChild(hl);
-      const tl = document.createElement('div'); tl.className = 'textLayer'; tl.dataset['page'] = String(n); wrap.appendChild(tl);
+
+      const hl = document.createElement('div'); hl.className = 'hllayer'; hl.dataset['page'] = String(n);
+      wrap.appendChild(hl);
+
+      const tl = document.createElement('div'); tl.className = 'textLayer'; tl.dataset['page'] = String(n);
+      wrap.appendChild(tl);
+
       vpi.appendChild(wrap);
     }
+
     restoreHl(tid, pdf.id);
     attachObserver(tid);
-  } catch (e) {
+
+  } catch (err) {
     const v2 = $('vpi-' + tid);
-    if (v2) v2.innerHTML = `<div style="padding:30px;color:var(--danger);display:flex;align-items:center;gap:8px">${svgI('warn', 16, 16)} ${esc(e instanceof Error ? e.message : String(e))}</div>`;
+    if (v2) v2.innerHTML = `<div style="padding:30px;color:var(--danger);display:flex;align-items:center;gap:8px">${svgI('warn', 16, 16)} ${esc(err instanceof Error ? err.message : String(err))}</div>`;
   }
 }
 
+// ─── Page rendering ───────────────────────────────────────────────────────────
+
 async function renderPage(tid: string, wrap: HTMLElement, pageNum: number): Promise<void> {
   const r = readers.get(tid); if (!r) return;
-  const page = await r.pdfDoc.getPage(pageNum);
-  if (!readers.get(tid)) return;
-  const vp = page.getViewport({ scale: r.zoom });
-  const cv = document.createElement('canvas');
-  cv.width = Math.floor(vp.width); cv.height = Math.floor(vp.height);
-  const ctx = cv.getContext('2d');
-  if (ctx) await page.render({ canvasContext: ctx, viewport: vp }).promise;
-  if (!readers.get(tid)) return;
-  wrap.insertBefore(cv, wrap.firstChild);
-  wrap.querySelector('.page-loading')?.remove();
-  await renderTextLayer(wrap, page, vp);
+
+  // Device pixel ratio for crisp HiDPI rendering
+  const dpr   = window.devicePixelRatio ?? 1;
+  const scale = r.zoom * dpr;
+
+  try {
+    // Ask Rust for the rendered page as base64 PNG
+    const b64 = await invoke<string>('pdf_render_page', {
+      sessionId:  r.sessionId,
+      pageIndex:  pageNum - 1,   // Rust is 0-based
+      scale,
+    });
+
+    // Get page dimensions for layout
+    let [wPts, hPts] = r.pageSizes[pageNum - 1] ?? [595, 842];
+    if (r.pageSizes[pageNum - 1] === null) {
+      const sz = await invoke<[number, number]>('pdf_page_size', {
+        sessionId:  r.sessionId,
+        pageIndex:  pageNum - 1,
+      });
+      [wPts, hPts] = sz;
+      r.pageSizes[pageNum - 1] = sz;
+    }
+
+    if (!readers.get(tid)) return; // tab closed while awaiting
+
+    const cssW = Math.floor(wPts * r.zoom);
+    const cssH = Math.floor(hPts * r.zoom);
+    wrap.style.width  = cssW + 'px';
+    wrap.style.height = cssH + 'px';
+
+    // Replace placeholder canvas
+    wrap.querySelectorAll('canvas').forEach(c => c.remove());
+    const cv  = document.createElement('canvas');
+    cv.width  = Math.floor(wPts * scale);
+    cv.height = Math.floor(hPts * scale);
+    cv.style.width  = cssW + 'px';
+    cv.style.height = cssH + 'px';
+
+    const ctx = cv.getContext('2d')!;
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload  = () => resolve();
+      img.onerror = reject;
+      img.src = 'data:image/png;base64,' + b64;
+    });
+    ctx.drawImage(img, 0, 0);
+
+    wrap.insertBefore(cv, wrap.firstChild);
+    wrap.querySelector('.page-loading')?.remove();
+
+    // Render text layer for selection / search
+    await renderTextLayer(tid, wrap, pageNum, r);
+
+  } catch (err) {
+    console.error('renderPage', pageNum, err);
+    wrap.querySelector('.page-loading')?.remove();
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'padding:8px;color:var(--danger);font-size:11px';
+    errDiv.textContent = 'Render failed: ' + String(err);
+    wrap.appendChild(errDiv);
+  }
 }
 
-async function renderTextLayer(wrap: HTMLElement, page: PdfPage, vp: Viewport): Promise<void> {
+async function renderTextLayer(
+  tid: string,
+  wrap: HTMLElement,
+  pageNum: number,
+  r: ReaderState,
+): Promise<void> {
   const tl = wrap.querySelector<HTMLElement>('.textLayer'); if (!tl) return;
   tl.innerHTML = '';
-  tl.style.width  = Math.floor(vp.width)  + 'px';
-  tl.style.height = Math.floor(vp.height) + 'px';
+
+  const [wPts, hPts] = r.pageSizes[pageNum - 1] ?? [595, 842];
+  tl.style.width  = Math.floor(wPts * r.zoom) + 'px';
+  tl.style.height = Math.floor(hPts * r.zoom) + 'px';
+
   try {
-    const tc   = await page.getTextContent();
-    const task = (pdfjsLib as any).renderTextLayer({
-      textContentSource: tc,
-      container:         tl,
-      viewport:          vp,
-      textDivs:          [],
+    const spans = await invoke<TextSpan[]>('pdf_text_layer', {
+      sessionId:  r.sessionId,
+      pageIndex:  pageNum - 1,
+      scale:      r.zoom,
     });
-    if (task && typeof (task as any).promise?.then === 'function') {
-      await (task as any).promise;
-    } else if (task && typeof (task as any).then === 'function') {
-      await task;
+
+    for (const sp of spans) {
+      const el = document.createElement('span');
+      el.textContent    = sp.text;
+      el.style.left     = sp.x + 'px';
+      el.style.top      = sp.y + 'px';
+      el.style.width    = sp.w + 'px';
+      el.style.height   = sp.h + 'px';
+      el.style.fontSize = (sp.font_size * r.zoom) + 'px';
+      // Scale text to exactly fill its bounding box width
+      if (sp.w > 2 && sp.text.length > 0) {
+        const measured = sp.text.length * sp.font_size * r.zoom * 0.6; // rough em estimate
+        if (measured > 0) {
+          const scaleX = sp.w / measured;
+          el.style.transform = `scaleX(${Math.min(scaleX, 2).toFixed(3)})`;
+        }
+      }
+      tl.appendChild(el);
     }
-  } catch { }
+  } catch (err) {
+    console.warn('text layer', pageNum, err);
+  }
 }
 
+// ─── IntersectionObserver — lazy rendering ────────────────────────────────────
+
 function attachObserver(tid: string): void {
-  const r = readers.get(tid); if (!r) return;
+  const r   = readers.get(tid); if (!r) return;
   const vpEl = $('vp-' + tid); if (!vpEl) return;
   const vpi  = $('vpi-' + tid); if (!vpi) return;
+
   r.io?.disconnect(); r.io = null;
+
   const io = new IntersectionObserver(entries => {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
@@ -385,9 +511,13 @@ function attachObserver(tid: string): void {
       const n = parseInt(w.dataset['page'] ?? '0', 10);
       const rr = readers.get(tid);
       if (rr) { rr.currentPage = n; updateNav(tid); }
-      if (!w.dataset['rendered']) { w.dataset['rendered'] = '1'; renderPage(tid, w, n).catch(() => {}); }
+      if (!w.dataset['rendered']) {
+        w.dataset['rendered'] = '1';
+        renderPage(tid, w, n).catch(console.error);
+      }
     }
-  }, { root: vpEl, threshold: 0.01, rootMargin: '300px 0px' });
+  }, { root: vpEl, threshold: 0.01, rootMargin: '400px 0px' });
+
   vpi.querySelectorAll<HTMLElement>('.pwrap').forEach(w => io.observe(w));
   r.io = io;
 }
@@ -395,13 +525,10 @@ function attachObserver(tid: string): void {
 async function reRenderAll(tid: string): Promise<void> {
   const r = readers.get(tid); if (!r) return;
   const vpi = $('vpi-' + tid); if (!vpi) return;
+
   r.io?.disconnect(); r.io = null;
+
   for (const wrap of vpi.querySelectorAll<HTMLElement>('.pwrap')) {
-    const n = parseInt(wrap.dataset['page'] ?? '0', 10);
-    const page = await r.pdfDoc.getPage(n);
-    const vp   = page.getViewport({ scale: r.zoom });
-    wrap.style.width  = Math.floor(vp.width)  + 'px';
-    wrap.style.height = Math.floor(vp.height) + 'px';
     wrap.dataset['rendered'] = '';
     wrap.querySelectorAll('canvas').forEach(c => c.remove());
     const tl = wrap.querySelector<HTMLElement>('.textLayer'); if (tl) tl.innerHTML = '';
@@ -410,6 +537,7 @@ async function reRenderAll(tid: string): Promise<void> {
     ph.innerHTML = `<div class="cspin" style="width:16px;height:16px;border-width:1.5px"></div>`;
     wrap.insertBefore(ph, wrap.firstChild);
   }
+
   attachObserver(tid);
   restoreHl(tid, r.pdfId);
 }
@@ -424,7 +552,8 @@ function updateNav(tid: string): void {
 }
 
 function scrollToPage(tid: string, n: number): void {
-  $('vpi-' + tid)?.querySelector<HTMLElement>(`.pwrap[data-page="${n}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('vpi-' + tid)?.querySelector<HTMLElement>(`.pwrap[data-page="${n}"]`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 function rPrev(tid: string): void { const r = readers.get(tid); if (r && r.currentPage > 1) scrollToPage(tid, r.currentPage - 1); }
 function rNext(tid: string): void { const r = readers.get(tid); if (r && r.currentPage < r.pageCount) scrollToPage(tid, r.currentPage + 1); }
@@ -433,6 +562,20 @@ async function rZoom(tid: string, d: number): Promise<void> {
   r.zoom = Math.min(3.5, Math.max(0.4, +((r.zoom + d).toFixed(1))));
   updateNav(tid); await reRenderAll(tid);
 }
+
+// ─── Text selection & highlight popup ────────────────────────────────────────
+
+document.addEventListener('mouseup', () => {
+  setTimeout(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+    for (const [tid, meta] of tabMeta) {
+      if (meta.type !== 'reader') continue;
+      const vpi = $('vpi-' + tid); if (!vpi) continue;
+      if (sel.anchorNode && vpi.contains(sel.anchorNode)) { onSel(tid); return; }
+    }
+  }, 10);
+});
 
 function onSel(tid: string): void {
   const sel = window.getSelection();
@@ -464,7 +607,7 @@ function onSel(tid: string): void {
   if (!rects.length) { hideHlPopup(); return; }
 
   selTid = tid;
-  const r = readers.get(tid); if (r) r.selData = { pageNum: pn, rects, tid };
+  const r = readers.get(tid); if (r) r.selData = { pageNum: pn, rects };
 
   if (hlModeActive && hlModeTid === tid) { applyHighlight(); return; }
 
@@ -481,12 +624,115 @@ function onSel(tid: string): void {
 function hideHlPopup(): void { $('hl-popup')?.classList.remove('show'); selTid = null; }
 
 function toggleHlMode(tid: string): void {
-  const pg = $('page-' + tid); if (!pg) return;
+  const pg  = $('page-' + tid); if (!pg) return;
   const btn = pg.querySelector<HTMLElement>('.hl-mode-btn'); if (!btn) return;
   hlModeActive = !hlModeActive; hlModeTid = hlModeActive ? tid : null;
   btn.classList.toggle('active', hlModeActive);
   toast(hlModeActive ? 'Highlight mode ON — select text to highlight instantly' : 'Highlight mode OFF');
 }
+
+$('hl-popup')?.querySelectorAll<HTMLElement>('.hlcb').forEach(btn => {
+  btn.addEventListener('mousedown', e => e.preventDefault());
+  btn.addEventListener('click', () => {
+    $('hl-popup')?.querySelectorAll('.hlcb').forEach(b => b.classList.remove('sel'));
+    btn.classList.add('sel');
+    if (selTid) { const r = readers.get(selTid); if (r) r.hlColor = btn.dataset['c'] ?? r.hlColor; }
+  });
+  btn.addEventListener('dblclick', () => {
+    $('hl-popup')?.querySelectorAll('.hlcb').forEach(b => b.classList.remove('sel'));
+    btn.classList.add('sel');
+    if (selTid) { const r = readers.get(selTid); if (r) r.hlColor = btn.dataset['c'] ?? r.hlColor; }
+    applyHighlight();
+  });
+});
+$('hl-apply')?.addEventListener('mousedown', e => e.preventDefault());
+$('hl-apply')?.addEventListener('click', applyHighlight);
+$('hl-dismiss')?.addEventListener('click', () => { window.getSelection()?.removeAllRanges(); hideHlPopup(); });
+
+async function applyHighlight(): Promise<void> {
+  const tid = selTid; if (!tid) return;
+  const r   = readers.get(tid); if (!r?.selData) return;
+  const { pageNum, rects } = r.selData;
+  const pdfId = r.pdfId;
+  if (!appState.highlights[pdfId]) appState.highlights[pdfId] = [];
+  const hlId  = gId();
+  const color = r.hlColor || '#f9e04b';
+  const newHl: PdfHighlight = { id: hlId, page: pageNum, rects, color };
+  appState.highlights[pdfId]!.push(newHl);
+  await save();
+  drawHl(tid, pdfId, newHl);
+  window.getSelection()?.removeAllRanges();
+  hideHlPopup();
+}
+
+function drawHl(tid: string, pdfId: string, hl: PdfHighlight): void {
+  const layer = $('vpi-' + tid)?.querySelector<HTMLElement>(`.hllayer[data-page="${hl.page}"]`);
+  if (!layer) return;
+  hl.rects.forEach(rect => {
+    const d = document.createElement('div');
+    d.className = 'hlr'; d.dataset['hlId'] = hl.id;
+    d.style.cssText = `left:${rect.x}px;top:${rect.y}px;width:${rect.w}px;height:${rect.h}px;background:${hl.color};`;
+    d.title = 'Click to remove';
+    d.addEventListener('click', async e => {
+      e.stopPropagation();
+      appState.highlights[pdfId] = (appState.highlights[pdfId] ?? []).filter(h => h.id !== hl.id);
+      $('vpi-' + tid)?.querySelectorAll(`[data-hl-id="${hl.id}"]`).forEach(el => el.remove());
+      await save();
+    });
+    layer.appendChild(d);
+  });
+}
+
+function restoreHl(tid: string, pdfId: string): void {
+  const hls = appState.highlights[pdfId]; if (!hls) return;
+  hls.forEach(hl => drawHl(tid, pdfId, hl));
+}
+
+// ─── In-document find ─────────────────────────────────────────────────────────
+//
+// Search is handled purely on the frontend by scanning already-rendered text
+// layer spans (fast, no extra Rust call for already-visible pages).
+// For pages not yet rendered, the Rust pdf_search command is used.
+
+function toggleFind(tid: string): void {
+  const b = $('rfind-' + tid); if (!b) return;
+  b.classList.toggle('show');
+  if (b.classList.contains('show')) setTimeout(() => ($('rsi-' + tid) as HTMLInputElement | null)?.focus(), 50);
+}
+function closeFind(tid: string): void { $('rfind-' + tid)?.classList.remove('show'); clearFind(tid); }
+function clearFind(tid: string): void {
+  $('vpi-' + tid)?.querySelectorAll<HTMLElement>('.fhl').forEach(el => {
+    el.style.background = ''; el.style.outline = ''; el.classList.remove('fhl');
+  });
+  const r = readers.get(tid); if (r) { r.sMatches = []; r.sIdx = 0; }
+  const fi = $('finfo-' + tid); if (fi) fi.textContent = '';
+}
+
+function doFind(tid: string, q: string): void {
+  clearFind(tid); if (!q || !readers.get(tid)) return;
+  const ql = q.toLowerCase();
+  const matches: HTMLElement[] = [];
+  $('vpi-' + tid)?.querySelectorAll<HTMLElement>('.textLayer span').forEach(s => {
+    if (s.textContent?.toLowerCase().includes(ql)) {
+      s.style.background = 'rgba(249,224,75,.5)'; s.classList.add('fhl'); matches.push(s);
+    }
+  });
+  const r = readers.get(tid); if (r) { r.sMatches = matches; r.sIdx = 0; }
+  const fi = $('finfo-' + tid); if (fi) fi.textContent = matches.length ? `${matches.length} found` : 'No results';
+  if (matches.length) navFind(tid, 1);
+}
+
+function navFind(tid: string, dir: number): void {
+  const r = readers.get(tid); if (!r || !r.sMatches.length) return;
+  r.sMatches[r.sIdx]?.style && (r.sMatches[r.sIdx]!.style.outline = '');
+  r.sIdx = (r.sIdx + dir + r.sMatches.length) % r.sMatches.length;
+  const el = r.sMatches[r.sIdx]; if (!el) return;
+  el.style.outline = '2px solid var(--ac)';
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const fi = $('finfo-' + tid); if (fi) fi.textContent = `${r.sIdx + 1} / ${r.sMatches.length}`;
+}
+
+// ─── Settings panel ───────────────────────────────────────────────────────────
 
 function buildSettingsSwatches(): void {
   const row = $('sp-hl-swatches'); if (!row) return;
@@ -500,7 +746,8 @@ function buildSettingsSwatches(): void {
       row.querySelectorAll('.sp-swatch').forEach(s => s.classList.remove('sel'));
       sw.classList.add('sel');
       if (settingsTid) { const r = readers.get(settingsTid); if (r) r.hlColor = c; }
-      $('hl-popup')?.querySelectorAll<HTMLElement>('.hlcb').forEach(b => b.classList.toggle('sel', b.dataset['c'] === c));
+      $('hl-popup')?.querySelectorAll<HTMLElement>('.hlcb').forEach(b =>
+        b.classList.toggle('sel', b.dataset['c'] === c));
     });
     row.appendChild(sw);
   });
@@ -543,107 +790,20 @@ $('sp-fu')?.addEventListener('click', () => {
 });
 document.addEventListener('click', e => {
   const t = e.target as HTMLElement;
-  if (!t.closest('#settings-panel') && !t.closest('[data-a="settings"]')) $('settings-panel')?.classList.remove('show');
+  if (!t.closest('#settings-panel') && !t.closest('[data-a="settings"]'))
+    $('settings-panel')?.classList.remove('show');
 });
 
-$('hl-popup')?.querySelectorAll<HTMLElement>('.hlcb').forEach(btn => {
-  btn.addEventListener('mousedown', e => e.preventDefault());
-  btn.addEventListener('click', () => {
-    $('hl-popup')?.querySelectorAll('.hlcb').forEach(b => b.classList.remove('sel'));
-    btn.classList.add('sel');
-    if (selTid) { const r = readers.get(selTid); if (r) r.hlColor = btn.dataset['c'] ?? r.hlColor; }
-  });
-  btn.addEventListener('dblclick', () => {
-    $('hl-popup')?.querySelectorAll('.hlcb').forEach(b => b.classList.remove('sel'));
-    btn.classList.add('sel');
-    if (selTid) { const r = readers.get(selTid); if (r) r.hlColor = btn.dataset['c'] ?? r.hlColor; }
-    applyHighlight();
-  });
-});
-$('hl-apply')?.addEventListener('mousedown', e => e.preventDefault());
-$('hl-apply')?.addEventListener('click', applyHighlight);
-$('hl-dismiss')?.addEventListener('click', () => { window.getSelection()?.removeAllRanges(); hideHlPopup(); });
-
-async function applyHighlight(): Promise<void> {
-  const tid = selTid; if (!tid) return;
-  const r = readers.get(tid); if (!r?.selData) return;
-  const { pageNum, rects } = r.selData;
-  const pdfId = r.pdfId;
-  if (!appState.highlights[pdfId]) appState.highlights[pdfId] = [];
-  const hlId  = gId();
-  const color = r.hlColor || '#f9e04b';
-  const newHl: PdfHighlight = { id: hlId, page: pageNum, rects, color };
-  appState.highlights[pdfId]!.push(newHl);
-  await save();
-  drawHl(tid, pdfId, newHl);
-  window.getSelection()?.removeAllRanges();
-  hideHlPopup();
-}
-
-function drawHl(tid: string, pdfId: string, hl: PdfHighlight): void {
-  const layer = $('vpi-' + tid)?.querySelector<HTMLElement>(`.hllayer[data-page="${hl.page}"]`);
-  if (!layer) return;
-  hl.rects.forEach(rect => {
-    const d = document.createElement('div');
-    d.className = 'hlr'; d.dataset['hlId'] = hl.id;
-    d.style.cssText = `left:${rect.x}px;top:${rect.y}px;width:${rect.w}px;height:${rect.h}px;background:${hl.color};`;
-    d.title = 'Click to remove';
-    d.addEventListener('click', async e => {
-      e.stopPropagation();
-      appState.highlights[pdfId] = (appState.highlights[pdfId] ?? []).filter(h => h.id !== hl.id);
-      $('vpi-' + tid)?.querySelectorAll(`[data-hl-id="${hl.id}"]`).forEach(el => el.remove());
-      await save();
-    });
-    layer.appendChild(d);
-  });
-}
-
-function restoreHl(tid: string, pdfId: string): void {
-  const hls = appState.highlights[pdfId];
-  if (!hls) return;
-  hls.forEach(hl => drawHl(tid, pdfId, hl));
-}
-
-function toggleFind(tid: string): void {
-  const b = $('rfind-' + tid); if (!b) return;
-  b.classList.toggle('show');
-  if (b.classList.contains('show')) setTimeout(() => ($('rsi-' + tid) as HTMLInputElement | null)?.focus(), 50);
-}
-function closeFind(tid: string): void { $('rfind-' + tid)?.classList.remove('show'); clearFind(tid); }
-function clearFind(tid: string): void {
-  $('vpi-' + tid)?.querySelectorAll<HTMLElement>('.fhl').forEach(el => { el.style.background = ''; el.style.outline = ''; el.classList.remove('fhl'); });
-  const r = readers.get(tid); if (r) { r.sMatches = []; r.sIdx = 0; }
-  const fi = $('finfo-' + tid); if (fi) fi.textContent = '';
-}
-function doFind(tid: string, q: string): void {
-  clearFind(tid); if (!q || !readers.get(tid)) return;
-  const ql = q.toLowerCase(); const matches: HTMLElement[] = [];
-  $('vpi-' + tid)?.querySelectorAll<HTMLElement>('.textLayer span').forEach(s => {
-    if (s.textContent?.toLowerCase().includes(ql)) {
-      s.style.background = 'rgba(249,224,75,.5)'; s.classList.add('fhl'); matches.push(s);
-    }
-  });
-  const r = readers.get(tid); if (r) { r.sMatches = matches; r.sIdx = 0; }
-  const fi = $('finfo-' + tid); if (fi) fi.textContent = matches.length ? `${matches.length} found` : 'No results';
-  if (matches.length) navFind(tid, 1);
-}
-function navFind(tid: string, dir: number): void {
-  const r = readers.get(tid); if (!r || !r.sMatches.length) return;
-  r.sMatches[r.sIdx]?.style && (r.sMatches[r.sIdx]!.style.outline = '');
-  r.sIdx = (r.sIdx + dir + r.sMatches.length) % r.sMatches.length;
-  const el = r.sMatches[r.sIdx]; if (!el) return;
-  el.style.outline = '2px solid var(--ac)';
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  const fi = $('finfo-' + tid); if (fi) fi.textContent = `${r.sIdx + 1} / ${r.sMatches.length}`;
-}
+// ─── Library rendering ────────────────────────────────────────────────────────
 
 function getFiltered(): PdfEntry[] {
   let p = appState.pdfs;
   if (activeTopic === '__u') p = p.filter(x => !x.topicId);
-  else if (activeTopic) p = p.filter(x => x.topicId === activeTopic);
+  else if (activeTopic)      p = p.filter(x => x.topicId === activeTopic);
   if (searchQ) { const q = searchQ.toLowerCase(); p = p.filter(x => x.name.toLowerCase().includes(q)); }
   return p;
 }
+
 function render(): void { renderSidebar(); renderContent(); }
 
 function renderSidebar(): void {
@@ -656,9 +816,9 @@ function renderSidebar(): void {
     if (onDel) d.querySelector('.tdel')?.addEventListener('click', e => { e.stopPropagation(); onDel(); });
     list.appendChild(d);
   };
-  row('All PDFs', '#5e5c59', appState.pdfs.length, activeTopic === null, () => { activeTopic = null; render(); });
+  row('All PDFs','#5e5c59', appState.pdfs.length, activeTopic === null, () => { activeTopic = null; render(); });
   const u = appState.pdfs.filter(p => !p.topicId).length;
-  if (u > 0) row('Unsorted', '#3e3c39', u, activeTopic === '__u', () => { activeTopic = '__u'; render(); });
+  if (u > 0) row('Unsorted','#3e3c39', u, activeTopic === '__u', () => { activeTopic = '__u'; render(); });
   appState.topics.forEach(t => {
     const c = appState.pdfs.filter(p => p.topicId === t.id).length;
     row(esc(t.name), t.color, c, activeTopic === t.id, () => { activeTopic = t.id; render(); }, () => delTopic(t.id));
@@ -668,10 +828,10 @@ function renderSidebar(): void {
 }
 
 function renderContent(): void {
-  const pdfs = getFiltered(); const empty = pdfs.length === 0;
+  const pdfs  = getFiltered(); const empty = pdfs.length === 0;
   const emptyEl = $('empty'); if (emptyEl) emptyEl.style.display = empty ? 'flex' : 'none';
-  const pgrid  = $('pgrid');  if (pgrid)  pgrid.style.display   = (!empty && viewMode === 'grid') ? 'grid' : 'none';
-  const plist  = $('plist');  if (plist)  plist.style.display   = (!empty && viewMode === 'list') ? 'flex' : 'none';
+  const pgrid   = $('pgrid');  if (pgrid)  pgrid.style.display   = (!empty && viewMode === 'grid') ? 'grid' : 'none';
+  const plist   = $('plist');  if (plist)  plist.style.display   = (!empty && viewMode === 'list') ? 'flex' : 'none';
   let title = 'All PDFs';
   if (activeTopic === '__u') title = 'Unsorted';
   else if (activeTopic) { const t = appState.topics.find(t => t.id === activeTopic); if (t) title = `<span class="ti" style="background:${t.color}"></span>${esc(t.name)}`; }
@@ -684,7 +844,7 @@ function renderGrid(pdfs: PdfEntry[]): void {
   const g = $('pgrid'); if (!g) return; g.innerHTML = '';
   pdfs.forEach(pdf => {
     const topic = appState.topics.find(t => t.id === pdf.topicId);
-    const card = document.createElement('div'); card.className = 'card';
+    const card  = document.createElement('div'); card.className = 'card';
     const fallback = `<svg width="26" height="26" opacity=".18"><use href="#i-doc"/></svg>${topic ? `<div style="width:20px;height:3px;border-radius:2px;background:${topic.color};opacity:.65;margin-top:6px"></div>` : ''}`;
     card.innerHTML = `
       ${!pdf.exists ? `<div class="miss-badge">${svgI('warn', 10, 10)} Missing</div>` : ''}
@@ -708,7 +868,7 @@ function renderList(pdfs: PdfEntry[]): void {
   const l = $('plist'); if (!l) return; l.innerHTML = '';
   pdfs.forEach(pdf => {
     const topic = appState.topics.find(t => t.id === pdf.topicId);
-    const row = document.createElement('div'); row.className = 'lrow';
+    const row   = document.createElement('div'); row.className = 'lrow';
     row.innerHTML = `
       <div class="lthumb" id="lt-${pdf.id}"><svg width="14" height="14" opacity=".3"><use href="#i-doc"/></svg></div>
       <span class="lname">${!pdf.exists ? `<span style="color:var(--danger);margin-right:4px">${svgI('warn', 11, 11)}</span>` : ''}${esc(pdf.name)}</span>
@@ -724,14 +884,21 @@ function renderList(pdfs: PdfEntry[]): void {
   });
 }
 
+// ─── Import / open ────────────────────────────────────────────────────────────
+
 $('btn-import')?.addEventListener('click', importPdfs);
 
 async function importPdfs(): Promise<void> {
-  const files = await invoke<OpenedFile[]>('open_pdf_dialog'); if (!files.length) return;
+  const files = await invoke<OpenedFile[]>('open_pdf_dialog');
+  if (!files.length) return;
   let added = 0;
   for (const f of files) {
     if (appState.pdfs.find(p => p.path === f.path)) continue;
-    appState.pdfs.push({ id: gId(), path: f.path, name: f.name, size: f.size, added: f.added, topicId: (activeTopic && activeTopic !== '__u') ? activeTopic : null, exists: true });
+    appState.pdfs.push({
+      id: gId(), path: f.path, name: f.name, size: f.size, added: f.added,
+      topicId: (activeTopic && activeTopic !== '__u') ? activeTopic : null,
+      exists: true,
+    });
     added++;
   }
   if (added > 0) { await save(); toast(`Added ${added} PDF${added !== 1 ? 's' : ''}`); render(); }
@@ -739,46 +906,21 @@ async function importPdfs(): Promise<void> {
 }
 
 $('tab-add')?.addEventListener('click', async () => {
-  const files = await invoke<OpenedFile[]>('open_pdf_dialog'); if (!files.length) return;
+  const files = await invoke<OpenedFile[]>('open_pdf_dialog');
+  if (!files.length) return;
   const toOpen: PdfEntry[] = [];
   for (const f of files) {
     let pdf = appState.pdfs.find(p => p.path === f.path);
-    if (!pdf) { pdf = { id: gId(), path: f.path, name: f.name, size: f.size, added: f.added, topicId: null, exists: true }; appState.pdfs.push(pdf); }
+    if (!pdf) {
+      pdf = { id: gId(), path: f.path, name: f.name, size: f.size, added: f.added, topicId: null, exists: true };
+      appState.pdfs.push(pdf);
+    }
     toOpen.push(pdf);
   }
   await save(); render(); toOpen.forEach(p => openPdfTab(p));
 });
 
-const cont = $('content');
-cont?.addEventListener('dragover', e => { e.preventDefault(); (cont as HTMLElement).style.outline = '2px dashed var(--ac)'; (cont as HTMLElement).style.background = 'var(--adim)'; });
-cont?.addEventListener('dragleave', () => { (cont as HTMLElement).style.outline = ''; (cont as HTMLElement).style.background = ''; });
-cont?.addEventListener('drop', async e => {
-  e.preventDefault();
-  (cont as HTMLElement).style.outline = ''; (cont as HTMLElement).style.background = '';
-  const dt = (e as DragEvent).dataTransfer; if (!dt) return;
-  const files = [...dt.files].filter(f => f.name.toLowerCase().endsWith('.pdf'));
-  if (!files.length) return;
-  const toOpen: PdfEntry[] = []; let added = 0;
-  for (const f of files) {
-    const fp = (f as File & { path?: string }).path ?? f.name;
-    let pdf = appState.pdfs.find(p => p.path === fp);
-    if (!pdf) {
-      pdf = { id: gId(), path: fp, name: f.name.replace(/\.pdf$/i, ''), size: f.size, added: Date.now(), topicId: (activeTopic && activeTopic !== '__u') ? activeTopic : null, exists: true };
-      appState.pdfs.push(pdf); added++;
-    }
-    toOpen.push(pdf);
-  }
-  if (added > 0) { await save(); render(); }
-  toOpen.forEach(p => openPdfTab(p));
-});
-
-async function removePdf(id: string): Promise<void> {
-  appState.pdfs = appState.pdfs.filter(p => p.id !== id);
-  delete appState.highlights[id];
-  coverCache.delete(id);
-  for (const [tid, m] of tabMeta) { if (m.pdfId === id) closeTab(tid); }
-  await save(); render(); toast('Removed from library');
-}
+// ─── Topic management ─────────────────────────────────────────────────────────
 
 $('btn-nt')?.addEventListener('click', () => { pendingAssignId = null; openTopicModal(); });
 
@@ -796,6 +938,7 @@ function openTopicModal(): void {
   $('mtopic')?.classList.add('show');
   setTimeout(() => ($('tname') as HTMLInputElement | null)?.focus(), 100);
 }
+
 $('btn-ct')?.addEventListener('click', () => { $('mtopic')?.classList.remove('show'); pendingAssignId = null; });
 $('btn-st')?.addEventListener('click', async () => {
   const tn = $('tname') as HTMLInputElement | null;
@@ -816,6 +959,8 @@ async function delTopic(id: string): Promise<void> {
   await save(); render(); toast('Topic deleted');
 }
 
+// ─── Context menu dropdown ────────────────────────────────────────────────────
+
 function showDD(anchor: HTMLElement, pdf: PdfEntry): void {
   ddPdf = pdf; const menu = $('ddm'); if (!menu) return;
   const tItems = appState.topics.map(t =>
@@ -831,7 +976,8 @@ function showDD(anchor: HTMLElement, pdf: PdfEntry): void {
     <div class="ddi" data-a="rename">${svgI('edit', 12, 12)} Rename</div>
     <div class="ddi danger" data-a="remove">${svgI('trash', 12, 12)} Remove from Library</div>`;
   const rect = anchor.getBoundingClientRect();
-  menu.style.top = (rect.bottom + 4) + 'px'; menu.style.left = rect.left + 'px';
+  menu.style.top  = (rect.bottom + 4) + 'px';
+  menu.style.left = rect.left + 'px';
   menu.classList.add('show');
   requestAnimationFrame(() => {
     const mr = menu.getBoundingClientRect();
@@ -842,12 +988,17 @@ function showDD(anchor: HTMLElement, pdf: PdfEntry): void {
 
 document.addEventListener('click', e => {
   const t = e.target as HTMLElement;
-  if (!t.closest('#ddm') && !t.closest('.card-menu') && !t.closest('.lmenu')) $('ddm')?.classList.remove('show');
-  if (!t.closest('#hl-popup') && !t.closest('.textLayer') && !t.closest('.pwrap')) hideHlPopup();
+  if (!t.closest('#ddm') && !t.closest('.card-menu') && !t.closest('.lmenu'))
+    $('ddm')?.classList.remove('show');
+  if (!t.closest('#hl-popup') && !t.closest('.textLayer') && !t.closest('.pwrap'))
+    hideHlPopup();
 });
+
 $('ddm')?.addEventListener('click', async e => {
-  const item = (e.target as HTMLElement).closest<HTMLElement>('[data-a]'); if (!item || !ddPdf) return;
-  $('ddm')?.classList.remove('show'); const a = item.dataset['a'];
+  const item = (e.target as HTMLElement).closest<HTMLElement>('[data-a]');
+  if (!item || !ddPdf) return;
+  $('ddm')?.classList.remove('show');
+  const a = item.dataset['a'];
   if      (a === 'open')   openPdfTab(ddPdf);
   else if (a === 'assign') { ddPdf.topicId = item.dataset['tid'] || null; await save(); render(); toast(item.dataset['tid'] ? 'Topic assigned' : 'Moved to Unsorted'); }
   else if (a === 'nt')     { pendingAssignId = ddPdf.id; openTopicModal(); }
@@ -855,29 +1006,34 @@ $('ddm')?.addEventListener('click', async e => {
   else if (a === 'remove') removePdf(ddPdf.id);
 });
 
+async function removePdf(id: string): Promise<void> {
+  appState.pdfs = appState.pdfs.filter(p => p.id !== id);
+  delete appState.highlights[id];
+  coverCache.delete(id);
+  for (const [tid, m] of tabMeta) { if (m.pdfId === id) closeTab(tid); }
+  await save(); render(); toast('Removed from library');
+}
+
+// ─── View toggle & search ─────────────────────────────────────────────────────
+
 $('vg')?.addEventListener('click', () => { viewMode = 'grid'; $('vg')?.classList.add('active'); $('vl')?.classList.remove('active'); renderContent(); });
 $('vl')?.addEventListener('click', () => { viewMode = 'list'; $('vl')?.classList.add('active'); $('vg')?.classList.remove('active'); renderContent(); });
 ($('sinput') as HTMLInputElement | null)?.addEventListener('input', e => { searchQ = (e.target as HTMLInputElement).value; renderContent(); });
 
+// ─── File existence check ─────────────────────────────────────────────────────
+
 async function checkFiles(): Promise<void> {
   let changed = false;
-  for (const pdf of appState.pdfs) { const e = await invoke<boolean>('check_exists', { path: pdf.path }); if (pdf.exists !== e) { pdf.exists = e; changed = true; } }
+  for (const pdf of appState.pdfs) {
+    const e = await invoke<boolean>('check_exists', { path: pdf.path });
+    if (pdf.exists !== e) { pdf.exists = e; changed = true; }
+  }
   if (changed) { await save(); render(); }
 }
 
-document.addEventListener('mouseup', () => {
-  setTimeout(() => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
-    for (const [tid, meta] of tabMeta) {
-      if (meta.type !== 'reader') continue;
-      const vpi = $('vpi-' + tid); if (!vpi) continue;
-      if (sel.anchorNode && vpi.contains(sel.anchorNode)) { onSel(tid); return; }
-    }
-  }, 10);
-});
+// ─── Entry point ─────────────────────────────────────────────────────────────
 
-if (window.__TAURI__) {
+if (typeof window.__TAURI__ !== 'undefined') {
   boot();
 } else {
   window.addEventListener('tauri-ready', () => boot(), { once: true });
