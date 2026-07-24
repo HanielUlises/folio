@@ -1111,11 +1111,13 @@ fn color_picker(ui: &mut egui::Ui, current: &mut String) {
     });
 }
 
-/// Group glyphs (in reading order) into text lines. Two glyphs share a line when
-/// their vertical extents *overlap* by more than half the smaller glyph height —
-/// robust to ascenders/descenders and mixed sizes, unlike baseline-equality which
-/// splits a line the moment a descender shifts the reference. `chars` are assumed
-/// left-to-right within a line (pdfium's reading order).
+/// Group glyphs (in reading order) into text lines. A glyph joins the current
+/// line when their vertical extents overlap by more than half the smaller
+/// height, *or* when either box's vertical centre lies inside the other's
+/// extent. The centre test is essential: pdfium gives space glyphs a
+/// zero-height box sitting on the baseline, which has no overlap with the
+/// letters' band — without it every space would start a new line, and a
+/// selection would render as disconnected words rather than whole sentences.
 fn build_lines(chars: &[CharBox]) -> Vec<LineBox> {
     let mut lines: Vec<LineBox> = Vec::new();
     let mut i = 0;
@@ -1127,9 +1129,14 @@ fn build_lines(chars: &[CharBox]) -> Vec<LineBox> {
         while i < chars.len() {
             let c = &chars[i];
             let (c_top, c_bottom) = (c.y, c.y + c.h);
+            let c_center = (c_top + c_bottom) * 0.5;
+            let line_center = (top + bottom) * 0.5;
             let overlap = bottom.min(c_bottom) - top.max(c_top);
             let min_h = (bottom - top).min(c.h).max(1.0);
-            if overlap > 0.5 * min_h {
+            let joins = overlap > 0.5 * min_h
+                || (c_center >= top && c_center <= bottom)
+                || (line_center >= c_top && line_center <= c_bottom);
+            if joins {
                 top = top.min(c_top);
                 bottom = bottom.max(c_bottom);
                 left = left.min(c.x);

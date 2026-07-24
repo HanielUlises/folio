@@ -18,7 +18,7 @@ The complete library state (topics, tags, document entries and highlights) can b
 
 ## Download
 
-Pre-built Linux binaries are available from the [Releases](https://github.com/<user>/<repo>/releases) page. Extract the archive and run the `folio` executable. The required `libpdfium.so` is included.
+Pre-built Linux binaries are available from the [Releases](https://github.com/HanielUlises/folio/releases) page. Extract the archive and run the `folio` executable. The required `libpdfium.so` is included.
 
 ## Requirements
 
