@@ -16,6 +16,10 @@ const ACCENT: Color32 = Color32::from_rgb(0xd4, 0xa8, 0x43);
 const TXT: Color32 = Color32::from_rgb(0xee, 0xeb, 0xe5);
 const TXT_DIM: Color32 = Color32::from_rgb(0x8e, 0x8b, 0x86);
 const PAGE_BG: Color32 = Color32::from_rgb(0x21, 0x21, 0x25);
+// Live text-selection ribbon (transient), distinct from saved highlight
+// annotations. A translucent Breeze-style selection blue (#3daee9) premultiplied
+// over the page — reads like a native desktop selection, text stays legible.
+const SELECT_FILL: Color32 = Color32::from_rgba_premultiplied(0x19, 0x48, 0x60, 0x69);
 
 const COVER_W: u32 = 300;
 
@@ -38,12 +42,24 @@ enum Cover {
     Failed,
 }
 
+/// One text line on a page: a contiguous run of glyphs (in reading order)
+/// sharing a baseline and height. `end` is exclusive. Built once from `chars`
+/// and used for all hit-testing, mirroring how Poppler/Okular group glyphs.
+#[derive(Clone, Copy)]
+struct LineBox {
+    start: usize,
+    end: usize,
+    top: f32,
+    bottom: f32,
+}
+
 struct PageSlot {
     size_pts: Option<(f32, f32)>,
     texture: Option<TextureHandle>,
     rendered_zoom: f32,
     requested_zoom: f32,
     chars: Option<Vec<CharBox>>,
+    lines: Option<Vec<LineBox>>,
     chars_requested: bool,
 }
 
@@ -55,6 +71,7 @@ impl Default for PageSlot {
             rendered_zoom: -1.0,
             requested_zoom: -1.0,
             chars: None,
+            lines: None,
             chars_requested: false,
         }
     }
@@ -62,6 +79,8 @@ impl Default for PageSlot {
 
 struct Selection {
     page: u32,
+    /// Anchor and focus caret indices (0..=char_count). The selected glyphs are
+    /// those in the half-open range `[min(start,end), max(start,end))`.
     start: usize,
     end: usize,
     text: String,
@@ -79,6 +98,7 @@ struct Reader {
     hl_color: String,
     selection: Option<Selection>,
     open_failed: Option<String>,
+    scroll_offset: f32, // last vertical scroll offset, for zoom-to-cursor
 }
 
 pub struct Folio {
@@ -212,6 +232,7 @@ impl Folio {
             hl_color: HL_COLORS[0].to_string(),
             selection: None,
             open_failed: None,
+            scroll_offset: 0.0,
         });
         self.view = View::Reader;
     }
@@ -759,6 +780,11 @@ impl Folio {
     }
 
     fn ui_pages(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Ctrl/⌘ + scroll (or trackpad pinch) zooms, anchored under the cursor —
+        // must run before we snapshot `zoom`, and it may force a scroll offset.
+        let viewport_top = ui.max_rect().top();
+        let forced_offset = self.apply_scroll_zoom(ctx, viewport_top);
+
         let Some(reader) = self.reader.as_ref() else { return };
 
         if let Some(err) = &reader.open_failed {
@@ -788,13 +814,18 @@ impl Folio {
         let mut new_selection: Option<Selection> = None;
         let mut save_highlight: Option<PdfHighlight> = None;
         let mut remove_highlight: Option<String> = None;
+        let mut deselect = false; // a plain click on empty text clears the selection
         let mut requests: Vec<Req> = Vec::new();
         let mut top_visible_page = reader.current_page;
         let mut first_visible_set = false;
 
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .drag_to_scroll(false) // drags are for text selection, not panning
+            .drag_to_scroll(false); // drags are for text selection, not panning
+        if let Some(off) = forced_offset {
+            area = area.vertical_scroll_offset(off);
+        }
+        let area_out = area
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(12.0);
@@ -802,6 +833,10 @@ impl Folio {
                         let slot = &mut reader.pages[idx as usize];
                         let (w_pts, h_pts) = slot.size_pts.unwrap_or(default_size);
                         let disp = Vec2::new(w_pts * zoom, h_pts * zoom);
+                        // Build the line index once glyphs are available.
+                        if slot.lines.is_none() && slot.chars.is_some() {
+                            slot.lines = Some(build_lines(slot.chars.as_ref().unwrap()));
+                        }
 
                         let (rect, resp) = ui.allocate_exact_size(disp, Sense::click_and_drag());
                         let visible = ui.is_rect_visible(rect);
@@ -843,57 +878,98 @@ impl Folio {
                                 }
                             }
 
-                            // selection overlay (only for the page holding the selection)
+                            // selection overlay (only for the page holding the selection).
+                            // Translucent blue ribbon, à la Okular: one uniform-height row
+                            // per text line, from the first to the last selected glyph.
                             if let Some(sel) = &reader.selection {
                                 if sel.page == idx + 1 {
-                                    if let Some(chars) = &slot.chars {
-                                        for (x0, y0, x1, y1) in selection_line_rects(chars, sel.start, sel.end) {
+                                    if let (Some(chars), Some(lines)) = (&slot.chars, &slot.lines) {
+                                        let pad_x = 1.0;
+                                        for (x0, y0, x1, y1) in selection_rects(chars, lines, sel.start, sel.end) {
                                             let sr = Rect::from_min_max(
-                                                Pos2::new(rect.left() + x0 * zoom, rect.top() + y0 * zoom),
-                                                Pos2::new(rect.left() + x1 * zoom, rect.top() + y1 * zoom),
+                                                Pos2::new(rect.left() + x0 * zoom - pad_x, rect.top() + y0 * zoom),
+                                                Pos2::new(rect.left() + x1 * zoom + pad_x, rect.top() + y1 * zoom),
                                             );
-                                            p.rect_filled(sr, CornerRadius::same(1), ACCENT.gamma_multiply(0.35));
+                                            p.rect_filled(sr, CornerRadius::same(2), SELECT_FILL);
                                         }
                                     }
                                 }
                             }
 
-                            // interaction: drag to select
-                            if let Some(chars) = &slot.chars {
-                                if resp.drag_started() || resp.dragged() {
+                            // text interaction: I-beam cursor, drag-select, word-select, hit-testing
+                            if let (Some(chars), Some(lines)) = (&slot.chars, &slot.lines) {
+                                // Which stored highlight (if any) is under a page-point position?
+                                let over_highlight = |pos: Pos2| -> Option<String> {
+                                    let fx = (pos.x - rect.left()) / disp.x;
+                                    let fy = (pos.y - rect.top()) / disp.y;
+                                    highlights
+                                        .iter()
+                                        .filter(|h| h.page == idx + 1)
+                                        .find(|h| h.rects.iter().any(|r| fx >= r.x && fx <= r.x + r.w && fy >= r.y && fy <= r.y + r.h))
+                                        .map(|h| h.id.clone())
+                                };
+                                // Pointer position → caret index (0..=len) in page points.
+                                let caret = |pos: Pos2| caret_at(chars, lines, (pos.x - rect.left()) / zoom, (pos.y - rect.top()) / zoom);
+
+                                // Desktop-style cursor: I-beam over text, hand over a highlight.
+                                if resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                                } else if resp.hovered() {
+                                    let on_hl = resp.hover_pos().and_then(&over_highlight).is_some();
+                                    ui.ctx().set_cursor_icon(if on_hl { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Text });
+                                }
+
+                                if resp.triple_clicked() {
+                                    // Triple-click selects the whole line under the pointer.
                                     if let Some(pos) = resp.interact_pointer_pos() {
                                         let px = (pos.x - rect.left()) / zoom;
                                         let py = (pos.y - rect.top()) / zoom;
-                                        if let Some(ci) = char_at(chars, px, py) {
-                                            if resp.drag_started() {
-                                                new_selection = Some(Selection { page: idx + 1, start: ci, end: ci, text: String::new() });
-                                            } else if let Some(cur) = &reader.selection {
-                                                if cur.page == idx + 1 {
-                                                    new_selection = Some(Selection { page: idx + 1, start: cur.start, end: ci, text: String::new() });
-                                                }
-                                            }
+                                        if let Some(ci) = char_at(chars, lines, px, py) {
+                                            let (lo, hi) = line_range(lines, ci);
+                                            let text = selection_text(chars, lo, hi);
+                                            new_selection = Some(Selection { page: idx + 1, start: lo, end: hi, text });
                                         }
                                     }
-                                }
-                                // click on a highlight removes it
-                                if resp.clicked() {
+                                } else if resp.double_clicked() {
+                                    // Double-click selects the whole word under the pointer.
                                     if let Some(pos) = resp.interact_pointer_pos() {
-                                        let fx = (pos.x - rect.left()) / disp.x;
-                                        let fy = (pos.y - rect.top()) / disp.y;
-                                        for hl in highlights.iter().filter(|h| h.page == idx + 1) {
-                                            if hl.rects.iter().any(|r| fx >= r.x && fx <= r.x + r.w && fy >= r.y && fy <= r.y + r.h) {
-                                                remove_highlight = Some(hl.id.clone());
-                                            }
+                                        let px = (pos.x - rect.left()) / zoom;
+                                        let py = (pos.y - rect.top()) / zoom;
+                                        if let Some(ci) = char_at(chars, lines, px, py) {
+                                            let (lo, hi) = word_range(chars, ci);
+                                            let text = selection_text(chars, lo, hi);
+                                            new_selection = Some(Selection { page: idx + 1, start: lo, end: hi, text });
+                                        }
+                                    }
+                                } else if resp.drag_started() {
+                                    if let Some(pos) = resp.interact_pointer_pos() {
+                                        let c = caret(pos);
+                                        new_selection = Some(Selection { page: idx + 1, start: c, end: c, text: String::new() });
+                                    }
+                                } else if resp.dragged() {
+                                    if let (Some(pos), Some(cur)) = (resp.interact_pointer_pos(), &reader.selection) {
+                                        if cur.page == idx + 1 {
+                                            new_selection = Some(Selection { page: idx + 1, start: cur.start, end: caret(pos), text: String::new() });
+                                        }
+                                    }
+                                } else if resp.clicked() {
+                                    // A plain click removes a highlight, or clears the selection.
+                                    if let Some(pos) = resp.interact_pointer_pos() {
+                                        match over_highlight(pos) {
+                                            Some(id) => remove_highlight = Some(id),
+                                            None => deselect = true,
                                         }
                                     }
                                 }
-                            }
 
-                            // finished a drag → materialise selection text
-                            if resp.drag_stopped() {
-                                if let (Some(sel), Some(chars)) = (&reader.selection, &slot.chars) {
-                                    let text = selection_text(chars, sel.start, sel.end);
-                                    new_selection = Some(Selection { page: sel.page, start: sel.start, end: sel.end, text });
+                                // finished a drag → materialise selection text
+                                if resp.drag_stopped() {
+                                    if let Some(cur) = &reader.selection {
+                                        if cur.page == idx + 1 {
+                                            let text = selection_text(chars, cur.start, cur.end);
+                                            new_selection = Some(Selection { page: cur.page, start: cur.start, end: cur.end, text });
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -912,8 +988,12 @@ impl Folio {
                 });
             });
 
+        reader.scroll_offset = area_out.state.offset.y;
+
         if let Some(sel) = new_selection {
             reader.selection = Some(sel);
+        } else if deselect {
+            reader.selection = None;
         }
         reader.current_page = top_visible_page;
 
@@ -926,17 +1006,18 @@ impl Folio {
                 s.start,
                 s.end,
                 reader.pages[page_idx].chars.clone(),
+                reader.pages[page_idx].lines.clone(),
                 reader.pages[page_idx].size_pts.unwrap_or(default_size),
             )
         });
         let mut clear_selection = false;
-        if let Some((page, start, end, chars, (w_pts, h_pts))) = sel_snapshot {
+        if let Some((page, start, end, chars, lines, (w_pts, h_pts))) = sel_snapshot {
             egui::Area::new(egui::Id::new("hl-fab")).anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0]).show(ctx, |ui| {
                 egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.add(egui::Button::new(egui::RichText::new("Highlight selection").color(Color32::BLACK)).fill(parse_hex(&hl_color))).clicked() {
-                            if let Some(chars) = &chars {
-                                let rects = selection_line_rects(chars, start, end).into_iter().map(|(x0, y0, x1, y1)| HighlightRect {
+                            if let (Some(chars), Some(lines)) = (&chars, &lines) {
+                                let rects = selection_rects(chars, lines, start, end).into_iter().map(|(x0, y0, x1, y1)| HighlightRect {
                                     x: x0 / w_pts, y: y0 / h_pts, w: (x1 - x0) / w_pts, h: (y1 - y0) / h_pts,
                                 }).collect();
                                 save_highlight = Some(PdfHighlight { id: uuid::Uuid::new_v4().to_string(), page, rects, color: hl_color.clone() });
@@ -1006,65 +1087,170 @@ fn color_picker(ui: &mut egui::Ui, current: &mut String) {
     });
 }
 
-fn char_at(chars: &[CharBox], px: f32, py: f32) -> Option<usize> {
-    let mut best = None;
-    let mut best_d = f32::MAX;
-    for (i, c) in chars.iter().enumerate() {
-        if px >= c.x - 1.0 && px <= c.x + c.w + 1.0 && py >= c.y - 1.0 && py <= c.y + c.h + 1.0 {
-            return Some(i);
+/// Group glyphs (in reading order) into text lines the way Poppler/Okular do:
+/// a new line starts when a glyph no longer shares the current line's baseline
+/// (lower-y) and height. `chars` are assumed left-to-right within a line.
+fn build_lines(chars: &[CharBox]) -> Vec<LineBox> {
+    let mut lines: Vec<LineBox> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let start = i;
+        let mut top = chars[i].y;
+        let mut bottom = chars[i].y + chars[i].h;
+        let mut base = bottom; // baseline proxy: box bottom
+        let mut height = chars[i].h;
+        i += 1;
+        while i < chars.len() {
+            let c = &chars[i];
+            let c_base = c.y + c.h;
+            let tol = height.max(c.h) * 0.5;
+            let same_baseline = (c_base - base).abs() <= tol;
+            let similar_height = (c.h - height).abs() <= height.max(c.h) * 0.6;
+            if same_baseline && similar_height {
+                top = top.min(c.y);
+                bottom = bottom.max(c_base);
+                // track the running line metrics off the latest glyph
+                base = c_base;
+                height = height.max(c.h);
+                i += 1;
+            } else {
+                break;
+            }
         }
-        let cx = c.x + c.w * 0.5;
-        let cy = c.y + c.h * 0.5;
-        let d = (cx - px).powi(2) + (cy - py).powi(2);
-        if d < best_d {
-            best_d = d;
-            best = Some(i);
-        }
+        lines.push(LineBox { start, end: i, top, bottom });
     }
-    best
+    lines
 }
 
-/// Merge the selected char range into per-line rectangles (in page points).
-fn selection_line_rects(chars: &[CharBox], a: usize, b: usize) -> Vec<(f32, f32, f32, f32)> {
-    if chars.is_empty() {
-        return vec![];
+/// Index of the line nearest a vertical page position (containing it if possible).
+fn line_at(lines: &[LineBox], py: f32) -> Option<usize> {
+    if lines.is_empty() {
+        return None;
     }
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    let hi = hi.min(chars.len() - 1);
-    let mut rects: Vec<(f32, f32, f32, f32)> = Vec::new();
-    let mut cur: Option<(f32, f32, f32, f32)> = None;
-    for c in &chars[lo..=hi] {
-        let (x0, y0, x1, y1) = (c.x, c.y, c.x + c.w, c.y + c.h);
-        match cur {
-            Some(ref mut r) if (y0 - r.1).abs() < (c.h * 0.6).max(2.0) => {
-                r.0 = r.0.min(x0);
-                r.1 = r.1.min(y0);
-                r.2 = r.2.max(x1);
-                r.3 = r.3.max(y1);
-            }
-            _ => {
-                if let Some(r) = cur.take() {
-                    rects.push(r);
-                }
-                cur = Some((x0, y0, x1, y1));
-            }
+    let mut best = 0usize;
+    let mut best_d = f32::MAX;
+    for (k, l) in lines.iter().enumerate() {
+        let d = if py < l.top {
+            l.top - py
+        } else if py > l.bottom {
+            py - l.bottom
+        } else {
+            0.0
+        };
+        if d < best_d {
+            best_d = d;
+            best = k;
+        }
+        if d == 0.0 {
+            break;
         }
     }
-    if let Some(r) = cur {
-        rects.push(r);
+    Some(best)
+}
+
+/// Nearest glyph to a page-point position, restricted to its line (word/line select).
+fn char_at(chars: &[CharBox], lines: &[LineBox], px: f32, py: f32) -> Option<usize> {
+    let li = line_at(lines, py)?;
+    let line = lines[li];
+    let mut best = line.start;
+    let mut best_d = f32::MAX;
+    for i in line.start..line.end {
+        let c = &chars[i];
+        let d = (c.x + c.w * 0.5 - px).abs();
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    Some(best)
+}
+
+/// Caret index (0..=len) nearest a page-point position. Snaps to the nearest
+/// line, then to the glyph boundary nearest the pointer within that line —
+/// dragging past the last glyph selects to the line's end, like a real editor.
+fn caret_at(chars: &[CharBox], lines: &[LineBox], px: f32, py: f32) -> usize {
+    let Some(li) = line_at(lines, py) else { return 0 };
+    let line = lines[li];
+    for i in line.start..line.end {
+        let c = &chars[i];
+        if px < c.x + c.w * 0.5 {
+            return i;
+        }
+    }
+    line.end
+}
+
+/// Half-open caret range `[lo, hi)` covering the word (a run of non-whitespace
+/// glyphs on one line) that contains glyph `i`.
+fn word_range(chars: &[CharBox], i: usize) -> (usize, usize) {
+    if i >= chars.len() {
+        return (chars.len(), chars.len());
+    }
+    if chars[i].ch.is_whitespace() {
+        return (i, i + 1);
+    }
+    let same_line = |a: &CharBox, b: &CharBox| (a.y - b.y).abs() < a.h.max(b.h) * 0.6;
+    let mut lo = i;
+    while lo > 0 && !chars[lo - 1].ch.is_whitespace() && same_line(&chars[lo - 1], &chars[lo]) {
+        lo -= 1;
+    }
+    let mut hi = i;
+    while hi + 1 < chars.len() && !chars[hi + 1].ch.is_whitespace() && same_line(&chars[hi], &chars[hi + 1]) {
+        hi += 1;
+    }
+    (lo, hi + 1)
+}
+
+/// Half-open caret range `[lo, hi)` for the whole line that contains glyph `i`.
+fn line_range(lines: &[LineBox], i: usize) -> (usize, usize) {
+    for l in lines {
+        if i >= l.start && i < l.end {
+            return (l.start, l.end);
+        }
+    }
+    (i, i + 1)
+}
+
+/// Selection rectangles (page points) for the half-open caret range `[a, b)`:
+/// one uniform-height row per intersected text line, spanning from the first to
+/// the last selected glyph on that line. Uniform rows avoid the ragged, glyph-
+/// hugging boxes that read as "generic" — this is the Okular/Poppler look.
+fn selection_rects(chars: &[CharBox], lines: &[LineBox], a: usize, b: usize) -> Vec<(f32, f32, f32, f32)> {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let hi = hi.min(chars.len());
+    if lo >= hi {
+        return vec![];
+    }
+    let mut rects = Vec::new();
+    for l in lines {
+        let s = l.start.max(lo);
+        let e = l.end.min(hi);
+        if s >= e {
+            continue;
+        }
+        let mut x0 = f32::MAX;
+        let mut x1 = f32::MIN;
+        for c in &chars[s..e] {
+            x0 = x0.min(c.x);
+            x1 = x1.max(c.x + c.w);
+        }
+        if x1 > x0 {
+            rects.push((x0, l.top, x1, l.bottom));
+        }
     }
     rects
 }
 
+/// Text for the half-open caret range `[a, b)`, inserting newlines between lines.
 fn selection_text(chars: &[CharBox], a: usize, b: usize) -> String {
-    if chars.is_empty() {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let hi = hi.min(chars.len());
+    if lo >= hi {
         return String::new();
     }
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    let hi = hi.min(chars.len() - 1);
     let mut s = String::new();
     let mut last_y = chars[lo].y;
-    for c in &chars[lo..=hi] {
+    for c in &chars[lo..hi] {
         if (c.y - last_y).abs() > c.h * 0.6 {
             s.push('\n');
         }
