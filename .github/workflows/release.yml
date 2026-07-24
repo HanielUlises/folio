@@ -42,21 +42,61 @@ jobs:
           name: folio-linux-x86_64
           path: dist/folio-linux-x86_64.tar.gz
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Build
+        working-directory: src-tauri
+        run: cargo build --release
+
+      # pdfium is loaded at runtime, so it isn't needed to compile — but the
+      # release needs pdfium.dll shipped next to folio.exe. Fetch the prebuilt
+      # Windows binary from bblanchon/pdfium-binaries.
+      - name: Fetch pdfium.dll
+        shell: pwsh
+        run: |
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
+          Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
+          tar -xzf pdfium.tgz bin/pdfium.dll
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/folio | Out-Null
+          Copy-Item src-tauri/target/release/folio.exe dist/folio/
+          Copy-Item bin/pdfium.dll dist/folio/
+          Compress-Archive -Path dist/folio/* -DestinationPath dist/folio-windows-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: folio-windows-x86_64
+          path: dist/folio-windows-x86_64.zip
+
   release:
-    needs: build-linux
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download artifact
+      # Download every uploaded artifact; each lands in its own subfolder.
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: folio-linux-x86_64
           path: dist
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/folio-linux-x86_64.tar.gz
+          files: |
+            dist/**/folio-linux-x86_64.tar.gz
+            dist/**/folio-windows-x86_64.zip
           generate_release_notes: true
           draft: false
