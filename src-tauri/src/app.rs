@@ -51,6 +51,8 @@ struct LineBox {
     end: usize,
     top: f32,
     bottom: f32,
+    left: f32,
+    right: f32,
 }
 
 struct PageSlot {
@@ -779,6 +781,28 @@ impl Folio {
             });
     }
 
+    /// Ctrl/⌘ + scroll (or trackpad pinch) zoom, anchored under the cursor.
+    /// Returns a forced vertical scroll offset for this frame that keeps the
+    /// point under the pointer visually fixed, or `None` if nothing zoomed.
+    fn apply_scroll_zoom(&mut self, ctx: &egui::Context, viewport_top: f32) -> Option<f32> {
+        let (zoom_delta, hover) = ctx.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
+        if (zoom_delta - 1.0).abs() < 1e-3 {
+            return None;
+        }
+        let r = self.reader.as_mut()?;
+        let old = r.zoom;
+        let new = (old * zoom_delta).clamp(0.5, 5.0);
+        if (new - old).abs() < 1e-4 {
+            return None;
+        }
+        r.zoom = new;
+        // Keep the content point under the cursor fixed: scale the distance from
+        // the viewport top through the zoom factor.
+        let f = new / old;
+        let anchor = (hover?.y - viewport_top).max(0.0);
+        Some(((r.scroll_offset + anchor) * f - anchor).max(0.0))
+    }
+
     fn ui_pages(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         // Ctrl/⌘ + scroll (or trackpad pinch) zooms, anchored under the cursor —
         // must run before we snapshot `zoom`, and it may force a scroll offset.
@@ -1087,70 +1111,69 @@ fn color_picker(ui: &mut egui::Ui, current: &mut String) {
     });
 }
 
-/// Group glyphs (in reading order) into text lines the way Poppler/Okular do:
-/// a new line starts when a glyph no longer shares the current line's baseline
-/// (lower-y) and height. `chars` are assumed left-to-right within a line.
+/// Group glyphs (in reading order) into text lines. Two glyphs share a line when
+/// their vertical extents *overlap* by more than half the smaller glyph height —
+/// robust to ascenders/descenders and mixed sizes, unlike baseline-equality which
+/// splits a line the moment a descender shifts the reference. `chars` are assumed
+/// left-to-right within a line (pdfium's reading order).
 fn build_lines(chars: &[CharBox]) -> Vec<LineBox> {
     let mut lines: Vec<LineBox> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let start = i;
-        let mut top = chars[i].y;
-        let mut bottom = chars[i].y + chars[i].h;
-        let mut base = bottom; // baseline proxy: box bottom
-        let mut height = chars[i].h;
+        let (mut top, mut bottom) = (chars[i].y, chars[i].y + chars[i].h);
+        let (mut left, mut right) = (chars[i].x, chars[i].x + chars[i].w);
         i += 1;
         while i < chars.len() {
             let c = &chars[i];
-            let c_base = c.y + c.h;
-            let tol = height.max(c.h) * 0.5;
-            let same_baseline = (c_base - base).abs() <= tol;
-            let similar_height = (c.h - height).abs() <= height.max(c.h) * 0.6;
-            if same_baseline && similar_height {
-                top = top.min(c.y);
-                bottom = bottom.max(c_base);
-                // track the running line metrics off the latest glyph
-                base = c_base;
-                height = height.max(c.h);
+            let (c_top, c_bottom) = (c.y, c.y + c.h);
+            let overlap = bottom.min(c_bottom) - top.max(c_top);
+            let min_h = (bottom - top).min(c.h).max(1.0);
+            if overlap > 0.5 * min_h {
+                top = top.min(c_top);
+                bottom = bottom.max(c_bottom);
+                left = left.min(c.x);
+                right = right.max(c.x + c.w);
                 i += 1;
             } else {
                 break;
             }
         }
-        lines.push(LineBox { start, end: i, top, bottom });
+        lines.push(LineBox { start, end: i, top, bottom, left, right });
     }
     lines
 }
 
-/// Index of the line nearest a vertical page position (containing it if possible).
-fn line_at(lines: &[LineBox], py: f32) -> Option<usize> {
-    if lines.is_empty() {
-        return None;
+/// Distance from `p` to the closed interval `[lo, hi]` (0 when inside).
+fn axis_dist(lo: f32, hi: f32, p: f32) -> f32 {
+    if p < lo {
+        lo - p
+    } else if p > hi {
+        p - hi
+    } else {
+        0.0
     }
-    let mut best = 0usize;
-    let mut best_d = f32::MAX;
-    for (k, l) in lines.iter().enumerate() {
-        let d = if py < l.top {
-            l.top - py
-        } else if py > l.bottom {
-            py - l.bottom
-        } else {
-            0.0
-        };
-        if d < best_d {
-            best_d = d;
-            best = k;
-        }
-        if d == 0.0 {
-            break;
+}
+
+/// The line best matching a page-point position: vertical distance dominates
+/// (so we land on the right row), horizontal distance breaks ties — which lets
+/// multiple columns or same-height lines resolve by which one the pointer is in.
+fn line_at(lines: &[LineBox], px: f32, py: f32) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_key = (f32::MAX, f32::MAX);
+    for (i, l) in lines.iter().enumerate() {
+        let key = (axis_dist(l.top, l.bottom, py), axis_dist(l.left, l.right, px));
+        if key.0 < best_key.0 || (key.0 == best_key.0 && key.1 < best_key.1) {
+            best_key = key;
+            best = Some(i);
         }
     }
-    Some(best)
+    best
 }
 
 /// Nearest glyph to a page-point position, restricted to its line (word/line select).
 fn char_at(chars: &[CharBox], lines: &[LineBox], px: f32, py: f32) -> Option<usize> {
-    let li = line_at(lines, py)?;
+    let li = line_at(lines, px, py)?;
     let line = lines[li];
     let mut best = line.start;
     let mut best_d = f32::MAX;
@@ -1165,11 +1188,11 @@ fn char_at(chars: &[CharBox], lines: &[LineBox], px: f32, py: f32) -> Option<usi
     Some(best)
 }
 
-/// Caret index (0..=len) nearest a page-point position. Snaps to the nearest
-/// line, then to the glyph boundary nearest the pointer within that line —
-/// dragging past the last glyph selects to the line's end, like a real editor.
+/// Caret index (0..=len) nearest a page-point position. Snaps to the best line,
+/// then to the glyph boundary nearest the pointer within that line — dragging
+/// past the last glyph selects to the line's end, like a real editor.
 fn caret_at(chars: &[CharBox], lines: &[LineBox], px: f32, py: f32) -> usize {
-    let Some(li) = line_at(lines, py) else { return 0 };
+    let Some(li) = line_at(lines, px, py) else { return 0 };
     let line = lines[li];
     for i in line.start..line.end {
         let c = &chars[i];
