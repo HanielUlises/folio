@@ -1,0 +1,5 @@
+# Pin Folio to a toolchain that satisfies egui's MSRV (>= 1.92), without
+# changing the machine's global default toolchain.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
