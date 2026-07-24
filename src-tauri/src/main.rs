@@ -2,6 +2,7 @@
 
 mod app;
 mod engine;
+mod icon;
 mod model;
 mod pdf;
 

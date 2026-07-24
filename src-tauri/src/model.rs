@@ -28,12 +28,22 @@ pub struct PdfEntry {
     pub size: u64,
     #[serde(default)]
     pub added: u64,
-    #[serde(rename = "topicId", default)]
-    pub topic_id: Option<String>,
+    /// Topics this PDF belongs to (a PDF may live in several topics at once).
+    #[serde(rename = "topicIds", default)]
+    pub topic_ids: Vec<String>,
+    /// Legacy single-topic field, migrated into `topic_ids` on load.
+    #[serde(rename = "topicId", default, skip_serializing)]
+    pub legacy_topic_id: Option<String>,
     #[serde(rename = "tagIds", default)]
     pub tag_ids: Vec<String>,
     #[serde(default = "yes")]
     pub exists: bool,
+}
+
+impl PdfEntry {
+    pub fn in_topic(&self, id: &str) -> bool {
+        self.topic_ids.iter().any(|t| t == id)
+    }
 }
 
 fn yes() -> bool {
@@ -68,6 +78,9 @@ pub struct AppData {
     pub pdfs: Vec<PdfEntry>,
     #[serde(default)]
     pub highlights: HashMap<String, Vec<PdfHighlight>>,
+    /// UI theme: "dark" (default) or "light".
+    #[serde(default)]
+    pub theme: String,
 }
 
 impl AppData {
@@ -80,10 +93,19 @@ impl AppData {
 
     pub fn load() -> Self {
         let path = Self::data_file();
-        fs::read_to_string(&path)
+        let mut data: AppData = fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Migrate old single-topic entries into the multi-topic list.
+        for p in &mut data.pdfs {
+            if let Some(id) = p.legacy_topic_id.take() {
+                if !p.topic_ids.contains(&id) {
+                    p.topic_ids.push(id);
+                }
+            }
+        }
+        data
     }
 
     pub fn save(&self) {

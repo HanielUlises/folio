@@ -25,6 +25,14 @@ pub struct CharBox {
     pub h: f32,
 }
 
+/// One entry in a document's table of contents (outline / bookmarks).
+#[derive(Clone, Debug)]
+pub struct OutlineItem {
+    pub level: u32,
+    pub title: String,
+    pub page: Option<u32>, // 0-based target page, if the bookmark has a destination
+}
+
 pub struct Engine {
     pdfium: &'static Pdfium,
 }
@@ -85,11 +93,22 @@ impl Engine {
 }
 
 impl Doc {
-    /// Page size in points (unscaled).
+    /// Page size in points (unscaled), as displayed — crop box, rotated.
     pub fn page_size(&self, page_index: u32) -> Option<(f32, f32)> {
         let pages = self.inner.pages();
         let page = pages.get(page_index as u16).ok()?;
-        Some((page.width().value, page.height().value))
+        Some(self.display_size(&page))
+    }
+
+    /// Displayed page size in points: the crop box, with width/height swapped
+    /// for 90°/270° rotation — the same frame `char_boxes` maps glyphs into.
+    fn display_size(&self, page: &PdfPage) -> (f32, f32) {
+        let (l, b, r, t) = self.effective_box(page);
+        let (bw, bh) = ((r - l).max(1.0), (t - b).max(1.0));
+        match page_rotation_degrees(page) {
+            90 | 270 => (bh, bw),
+            _ => (bw, bh),
+        }
     }
 
     /// Render a page at `scale` pixels-per-point, composited over white.
@@ -97,8 +116,7 @@ impl Doc {
         let pages = self.inner.pages();
         let page = pages.get(page_index as u16).map_err(|e| format!("{e:?}"))?;
 
-        let w_pts = page.width().value;
-        let h_pts = page.height().value;
+        let (w_pts, h_pts) = self.display_size(&page);
         let w_px = ((w_pts * scale).round() as i32).max(1);
         let h_px = ((h_pts * scale).round() as i32).max(1);
 
@@ -129,13 +147,23 @@ impl Doc {
         Ok(PageImage { width, height, rgba })
     }
 
-    /// Per-character boxes for a page, in page points with a top-left origin.
+    /// Per-character boxes for a page, in *rendered-image* points with a
+    /// top-left origin — i.e. aligned with what `render` produces, so overlays
+    /// sit exactly on the glyphs. This accounts for the crop box (glyph coords
+    /// are in page user space, which may have a non-zero origin) and for page
+    /// rotation (pdfium renders rotated; the text layout is not).
     pub fn char_boxes(&self, page_index: u32) -> Vec<CharBox> {
         let pages = self.inner.pages();
         let Ok(page) = pages.get(page_index as u16) else {
             return Vec::new();
         };
-        let page_h = page.height().value;
+
+        // Effective visible box (crop box if present, else media box).
+        let (box_left, box_bottom, box_right, box_top) = self.effective_box(&page);
+        let bw = (box_right - box_left).max(1.0);
+        let bh = (box_top - box_bottom).max(1.0);
+        let rot = page_rotation_degrees(&page);
+
         let Ok(text) = page.text() else {
             return Vec::new();
         };
@@ -145,18 +173,101 @@ impl Doc {
             let Ok(c) = chars.get(i) else { continue };
             let ch = c.unicode_char().unwrap_or(' ');
             let Ok(b) = c.loose_bounds() else { continue };
-            let left = b.left().value;
-            let right = b.right().value;
-            let top = b.top().value;
-            let bottom = b.bottom().value;
+            // Corners relative to the crop-box origin, in y-up user space.
+            let ul = b.left().value - box_left;
+            let ur = b.right().value - box_left;
+            let vb = b.bottom().value - box_bottom;
+            let vt = b.top().value - box_bottom;
+            // Map every corner into rendered (top-left, y-down) space, then take
+            // the axis-aligned bounding box — correct for any 90° rotation.
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (u, v) in [(ul, vb), (ur, vb), (ul, vt), (ur, vt)] {
+                let (x, y) = map_rot(u, v, bw, bh, rot);
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
             out.push(CharBox {
                 ch,
-                x: left,
-                y: page_h - top, // flip to top-left origin
-                w: (right - left).max(0.0),
-                h: (top - bottom).max(0.0),
+                x: x0,
+                y: y0,
+                w: (x1 - x0).max(0.0),
+                h: (y1 - y0).max(0.0),
             });
         }
         out
+    }
+
+    /// The document's table of contents, flattened depth-first with levels.
+    pub fn outline(&self) -> Vec<OutlineItem> {
+        let mut out = Vec::new();
+        let bookmarks = self.inner.bookmarks();
+        let mut node = bookmarks.root();
+        while let Some(bm) = node {
+            let next = bm.next_sibling();
+            collect_bookmarks(&bm, 0, &mut out);
+            node = next;
+            if out.len() > 5000 {
+                break; // guard against pathological / cyclic outlines
+            }
+        }
+        out
+    }
+
+    /// The visible page box (crop box, falling back to media box) as
+    /// `(left, bottom, right, top)` in user-space points.
+    fn effective_box(&self, page: &PdfPage) -> (f32, f32, f32, f32) {
+        let b = page
+            .boundaries()
+            .crop()
+            .or_else(|_| page.boundaries().media())
+            .map(|bb| bb.bounds);
+        match b {
+            Ok(r) => (r.left().value, r.bottom().value, r.right().value, r.top().value),
+            Err(_) => (0.0, 0.0, page.width().value, page.height().value),
+        }
+    }
+}
+
+/// Recursively flatten a bookmark subtree into `out`, indenting by `level`.
+fn collect_bookmarks(bm: &PdfBookmark, level: u32, out: &mut Vec<OutlineItem>) {
+    if level > 32 || out.len() > 5000 {
+        return;
+    }
+    let title = bm.title().unwrap_or_default();
+    let page = bm
+        .destination()
+        .and_then(|d| d.page_index().ok())
+        .map(|p| p as u32);
+    if !title.trim().is_empty() {
+        out.push(OutlineItem { level, title, page });
+    }
+    let mut child = bm.first_child();
+    while let Some(c) = child {
+        let next = c.next_sibling();
+        collect_bookmarks(&c, level + 1, out);
+        child = next;
+    }
+}
+
+/// Page rotation as a multiple of 90°, matching how pdfium renders the bitmap.
+fn page_rotation_degrees(page: &PdfPage) -> u16 {
+    match page.rotation() {
+        Ok(PdfPageRenderRotation::Degrees90) => 90,
+        Ok(PdfPageRenderRotation::Degrees180) => 180,
+        Ok(PdfPageRenderRotation::Degrees270) => 270,
+        _ => 0,
+    }
+}
+
+/// Map a crop-relative, y-up point `(u, v)` in a `bw × bh` box into rendered
+/// image space (top-left origin, y-down), applying the page's display rotation.
+fn map_rot(u: f32, v: f32, bw: f32, bh: f32, rot: u16) -> (f32, f32) {
+    match rot {
+        90 => (v, u),
+        180 => (bw - u, v),
+        270 => (bh - v, bw - u),
+        _ => (u, bh - v),
     }
 }

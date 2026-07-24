@@ -1,25 +1,94 @@
 //! Folio — native egui application.
 
 use crate::engine::{self, Req, Res, Worker};
+use crate::icon::{self, Icon};
 use crate::model::*;
-use crate::pdf::CharBox;
+use crate::pdf::{CharBox, OutlineItem};
 use eframe::egui::{self, Color32, ColorImage, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 use std::collections::HashMap;
 
-// ── Palette (dark, warm accent) ────────────────────────────────────────────
-const BG: Color32 = Color32::from_rgb(0x14, 0x14, 0x16);
-const PANEL: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1d);
-const CARD: Color32 = Color32::from_rgb(0x20, 0x20, 0x24);
-const CARD_HOV: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x30);
-const BORDER: Color32 = Color32::from_rgb(0x33, 0x33, 0x3a);
-const ACCENT: Color32 = Color32::from_rgb(0xd4, 0xa8, 0x43);
-const TXT: Color32 = Color32::from_rgb(0xee, 0xeb, 0xe5);
-const TXT_DIM: Color32 = Color32::from_rgb(0x8e, 0x8b, 0x86);
-const PAGE_BG: Color32 = Color32::from_rgb(0x21, 0x21, 0x25);
-// Live text-selection ribbon (transient), distinct from saved highlight
-// annotations. A translucent Breeze-style selection blue (#3daee9) premultiplied
-// over the page — reads like a native desktop selection, text stays legible.
-const SELECT_FILL: Color32 = Color32::from_rgba_premultiplied(0x19, 0x48, 0x60, 0x69);
+// ── Palette ─────────────────────────────────────────────────────────────────
+// All surface colours live in a `Pal` so the whole UI can be re-themed at once.
+// The warm gold accent and the blue selection ribbon are shared by both themes;
+// everything else flips between the dark and light variants below.
+#[derive(Clone, Copy)]
+struct Pal {
+    bg: Color32,
+    panel: Color32,
+    card: Color32,
+    card_hov: Color32,
+    border: Color32,
+    accent: Color32,
+    txt: Color32,
+    txt_dim: Color32,
+    page_bg: Color32,
+    // Live text-selection ribbon (transient), distinct from saved highlight
+    // annotations. A translucent Breeze-style selection blue (#3daee9),
+    // premultiplied — reads like a native desktop selection, text stays legible.
+    select_fill: Color32,
+}
+
+impl Pal {
+    const fn dark() -> Self {
+        Self {
+            bg: Color32::from_rgb(0x14, 0x14, 0x16),
+            panel: Color32::from_rgb(0x1a, 0x1a, 0x1d),
+            card: Color32::from_rgb(0x20, 0x20, 0x24),
+            card_hov: Color32::from_rgb(0x2a, 0x2a, 0x30),
+            border: Color32::from_rgb(0x33, 0x33, 0x3a),
+            accent: Color32::from_rgb(0xd4, 0xa8, 0x43),
+            txt: Color32::from_rgb(0xee, 0xeb, 0xe5),
+            txt_dim: Color32::from_rgb(0x8e, 0x8b, 0x86),
+            page_bg: Color32::from_rgb(0x21, 0x21, 0x25),
+            select_fill: Color32::from_rgba_premultiplied(0x19, 0x48, 0x60, 0x69),
+        }
+    }
+
+    /// True light theme: near-white surfaces, neutral greys.
+    const fn light() -> Self {
+        Self {
+            bg: Color32::from_rgb(0xf6, 0xf7, 0xf9),
+            panel: Color32::from_rgb(0xed, 0xef, 0xf2),
+            card: Color32::from_rgb(0xff, 0xff, 0xff),
+            card_hov: Color32::from_rgb(0xe9, 0xec, 0xf1),
+            border: Color32::from_rgb(0xd7, 0xda, 0xe0),
+            accent: Color32::from_rgb(0xb8, 0x8a, 0x2a),
+            txt: Color32::from_rgb(0x1c, 0x1e, 0x22),
+            txt_dim: Color32::from_rgb(0x6b, 0x70, 0x78),
+            page_bg: Color32::from_rgb(0xe4, 0xe6, 0xea),
+            select_fill: Color32::from_rgba_premultiplied(0x2c, 0x6f, 0x99, 0x55),
+        }
+    }
+
+    /// Warm sepia theme: easy-on-the-eyes paper tone.
+    const fn sepia() -> Self {
+        Self {
+            bg: Color32::from_rgb(0xf4, 0xf2, 0xee),
+            panel: Color32::from_rgb(0xea, 0xe7, 0xe1),
+            card: Color32::from_rgb(0xff, 0xff, 0xfb),
+            card_hov: Color32::from_rgb(0xf0, 0xec, 0xe4),
+            border: Color32::from_rgb(0xd6, 0xd1, 0xc8),
+            accent: Color32::from_rgb(0xb8, 0x8a, 0x2a),
+            txt: Color32::from_rgb(0x33, 0x2c, 0x22),
+            txt_dim: Color32::from_rgb(0x78, 0x70, 0x62),
+            page_bg: Color32::from_rgb(0xe7, 0xe1, 0xd4),
+            select_fill: Color32::from_rgba_premultiplied(0x2c, 0x6f, 0x99, 0x55),
+        }
+    }
+
+    fn from_name(name: &str) -> Self {
+        match name {
+            "light" => Self::light(),
+            "sepia" => Self::sepia(),
+            _ => Self::dark(),
+        }
+    }
+
+    /// Whether a theme name wants egui's dark base visuals.
+    fn is_dark(name: &str) -> bool {
+        !matches!(name, "light" | "sepia")
+    }
+}
 
 const COVER_W: u32 = 300;
 
@@ -34,6 +103,13 @@ enum Filter {
 enum View {
     Library,
     Reader,
+}
+
+/// How the "All PDFs" view arranges cards.
+#[derive(Clone, Copy, PartialEq)]
+enum LibLayout {
+    Grouped, // sectioned by topic, ISOTYPE-style folders
+    Flat,    // every PDF in one grid
 }
 
 enum Cover {
@@ -101,12 +177,18 @@ struct Reader {
     selection: Option<Selection>,
     open_failed: Option<String>,
     scroll_offset: f32, // last vertical scroll offset, for zoom-to-cursor
+    /// Highlight awaiting a delete confirmation: (highlight id, screen anchor).
+    pending_delete: Option<(String, Pos2)>,
+    outline: Vec<OutlineItem>,   // table of contents
+    scroll_to_page: Option<u32>, // pending jump target (1-based)
+    jump_input: String,          // page-number box contents
 }
 
 pub struct Folio {
     worker: Worker,
     engine_err: Option<String>,
     data: AppData,
+    pal: Pal,
     view: View,
     filter: Filter,
     search: String,
@@ -118,14 +200,27 @@ pub struct Folio {
     show_new_tag: bool,
     edit_name: String,
     edit_color: String,
+    /// When creating a topic from a PDF's menu, assign it to this PDF on create.
+    pending_topic_pdf: Option<String>,
     toast: Option<(String, f64)>,
+    // library layout customization
+    card_w: f32,
+    show_sidebar: bool,
+    show_outline: bool, // reader: table-of-contents panel
+    lib_layout: LibLayout,
+    show_topics: bool, // sidebar: topics section expanded
+    show_tags: bool,   // sidebar: tags section expanded
 }
 
 impl Folio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_style(&cc.egui_ctx);
-        let worker = Worker::spawn(cc.egui_ctx.clone());
         let mut data = AppData::load();
+        if data.theme.is_empty() {
+            data.theme = "dark".to_string();
+        }
+        let pal = Pal::from_name(&data.theme);
+        setup_style(&cc.egui_ctx, &pal, Pal::is_dark(&data.theme));
+        let worker = Worker::spawn(cc.egui_ctx.clone());
         // verify existence for the "missing" badge
         for p in &mut data.pdfs {
             p.exists = std::path::Path::new(&p.path).exists();
@@ -134,6 +229,7 @@ impl Folio {
             worker,
             engine_err: None,
             data,
+            pal,
             view: View::Library,
             filter: Filter::All,
             search: String::new(),
@@ -143,8 +239,26 @@ impl Folio {
             show_new_tag: false,
             edit_name: String::new(),
             edit_color: PALETTE[0].to_string(),
+            pending_topic_pdf: None,
             toast: None,
+            card_w: 156.0,
+            show_sidebar: true,
+            show_outline: true,
+            lib_layout: LibLayout::Grouped,
+            show_topics: true,
+            show_tags: true,
         }
+    }
+
+    /// Switch to a named theme ("dark" | "light" | "sepia") and persist it.
+    fn set_theme(&mut self, ctx: &egui::Context, name: &str) {
+        if self.data.theme == name {
+            return;
+        }
+        self.data.theme = name.to_string();
+        self.pal = Pal::from_name(name);
+        setup_style(ctx, &self.pal, Pal::is_dark(name));
+        self.save();
     }
 
     fn save(&self) {
@@ -162,8 +276,8 @@ impl Folio {
             .iter()
             .filter(|p| match &self.filter {
                 Filter::All => true,
-                Filter::Unsorted => p.topic_id.is_none(),
-                Filter::Topic(id) => p.topic_id.as_deref() == Some(id.as_str()),
+                Filter::Unsorted => p.topic_ids.is_empty(),
+                Filter::Topic(id) => p.in_topic(id),
                 Filter::Tag(id) => p.tag_ids.iter().any(|t| t == id),
             })
             .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q))
@@ -173,9 +287,11 @@ impl Folio {
 
     fn add_pdfs(&mut self, ctx: &egui::Context, paths: Vec<std::path::PathBuf>) {
         let mut added = 0;
+        let mut dup = 0;
         for path in paths {
             let ps = path.to_string_lossy().to_string();
             if self.data.pdfs.iter().any(|p| p.path == ps) {
+                dup += 1;
                 continue;
             }
             let name = path
@@ -188,9 +304,9 @@ impl Folio {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let topic_id = match &self.filter {
-                Filter::Topic(id) => Some(id.clone()),
-                _ => None,
+            let topic_ids = match &self.filter {
+                Filter::Topic(id) => vec![id.clone()],
+                _ => vec![],
             };
             let tag_ids = match &self.filter {
                 Filter::Tag(id) => vec![id.clone()],
@@ -202,7 +318,8 @@ impl Folio {
                 name,
                 size,
                 added: added_ms,
-                topic_id,
+                topic_ids,
+                legacy_topic_id: None,
                 tag_ids,
                 exists: true,
             });
@@ -210,7 +327,15 @@ impl Folio {
         }
         if added > 0 {
             self.save();
-            self.toast(ctx, &format!("Added {added} PDF{}", if added == 1 { "" } else { "s" }));
+        }
+        let msg = match (added, dup) {
+            (0, 0) => None,
+            (0, d) => Some(format!("Already in library ({d} skipped)")),
+            (a, 0) => Some(format!("Added {a} PDF{}", if a == 1 { "" } else { "s" })),
+            (a, d) => Some(format!("Added {a}, {d} already in library")),
+        };
+        if let Some(msg) = msg {
+            self.toast(ctx, &msg);
         }
     }
 
@@ -235,6 +360,10 @@ impl Folio {
             selection: None,
             open_failed: None,
             scroll_offset: 0.0,
+            pending_delete: None,
+            outline: Vec::new(),
+            scroll_to_page: None,
+            jump_input: String::new(),
         });
         self.view = View::Reader;
     }
@@ -257,6 +386,13 @@ impl Folio {
                         r.page_count = page_count;
                         r.default_size = first_size;
                         r.pages = (0..page_count).map(|_| PageSlot::default()).collect();
+                    }
+                }
+            }
+            Res::Outline { path, items } => {
+                if let Some(r) = &mut self.reader {
+                    if r.path == path {
+                        r.outline = items;
                     }
                 }
             }
@@ -301,22 +437,42 @@ impl Folio {
 
 impl eframe::App for Folio {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let pal = self.pal;
         // absorb everything the worker produced since the last frame
         for res in self.worker.drain() {
             self.handle_res(ctx, res);
         }
 
+        // Drag & drop: import any PDF files dropped onto the window.
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
+                .collect()
+        });
+        if !dropped.is_empty() {
+            if matches!(self.view, View::Reader) {
+                self.view = View::Library;
+            }
+            self.add_pdfs(ctx, dropped);
+        }
+        // While files hover over the window, show a drop hint.
+        let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
         // top bar
+        let mut pick_theme: Option<&str> = None;
         egui::TopBottomPanel::top("topbar")
             .exact_height(44.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(14, 0)))
+            .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::symmetric(14, 0)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(egui::RichText::new("Folio").color(ACCENT).size(18.0).strong());
+                    ui.label(egui::RichText::new("Folio").color(pal.accent).size(18.0).strong());
                     ui.add_space(8.0);
                     match &self.view {
                         View::Library => {
-                            ui.label(egui::RichText::new("· Library").color(TXT_DIM).size(13.0));
+                            ui.label(egui::RichText::new("· Library").color(pal.txt_dim).size(13.0));
                         }
                         View::Reader => {
                             if ui.button("‹  Library").clicked() {
@@ -324,15 +480,33 @@ impl eframe::App for Folio {
                             }
                             if let Some(r) = &self.reader {
                                 ui.add_space(6.0);
-                                ui.label(egui::RichText::new(&r.name).color(TXT_DIM).size(13.0));
+                                ui.label(egui::RichText::new(&r.name).color(pal.txt_dim).size(13.0));
                             }
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("v0.6 · native").color(TXT_DIM).size(11.0));
+                        let cur = self.data.theme.as_str();
+                        let cur_label = match cur {
+                            "light" => "Light",
+                            "sepia" => "Sepia",
+                            _ => "Dark",
+                        };
+                        ui.menu_button(egui::RichText::new(format!("Theme: {cur_label}")).size(12.0), |ui| {
+                            for (name, label) in [("dark", "Dark"), ("light", "Light"), ("sepia", "Sepia")] {
+                                if ui.selectable_label(cur == name, label).clicked() {
+                                    pick_theme = Some(name);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("v0.7 · native").color(pal.txt_dim).size(11.0));
                     });
                 });
             });
+        if let Some(name) = pick_theme {
+            self.set_theme(ctx, name);
+        }
 
         match self.view {
             View::Library => self.ui_library(ctx),
@@ -349,12 +523,12 @@ impl eframe::App for Folio {
                     .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0])
                     .show(ctx, |ui| {
                         egui::Frame::new()
-                            .fill(CARD)
-                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .fill(pal.card)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
                             .corner_radius(CornerRadius::same(8))
                             .inner_margin(egui::Margin::symmetric(14, 8))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new(msg).color(TXT));
+                                ui.label(egui::RichText::new(msg).color(pal.txt));
                             });
                     });
                 ctx.request_repaint();
@@ -362,43 +536,94 @@ impl eframe::App for Folio {
                 self.toast = None;
             }
         }
+
+        // drop hint while dragging files over the window
+        if hovering_files {
+            let screen = ctx.screen_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-hint")));
+            painter.rect_filled(screen, CornerRadius::ZERO, pal.accent.gamma_multiply(0.10));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop PDFs to add them",
+                egui::FontId::proportional(22.0),
+                pal.accent,
+            );
+        }
     }
 }
 
 impl Folio {
     // ── Library ─────────────────────────────────────────────────────────────
     fn ui_library(&mut self, ctx: &egui::Context) {
-        // sidebar
-        egui::SidePanel::left("sidebar")
-            .exact_width(238.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(0)))
-            .show(ctx, |ui| self.ui_sidebar(ui));
+        let pal = self.pal;
+        // sidebar (resizable + collapsible)
+        if self.show_sidebar {
+            egui::SidePanel::left("sidebar")
+                .default_width(238.0)
+                .width_range(180.0..=420.0)
+                .resizable(true)
+                .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::same(0)))
+                .show(ctx, |ui| self.ui_sidebar(ui));
+        }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(16)))
+            .frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::same(16)))
             .show(ctx, |ui| {
                 if let Some(err) = &self.engine_err {
                     ui.colored_label(Color32::from_rgb(0xd9, 0x65, 0x65), err);
                 }
                 // toolbar
                 ui.horizontal(|ui| {
-                    let title = match &self.filter {
-                        Filter::All => "All PDFs".to_string(),
-                        Filter::Unsorted => "Unsorted".to_string(),
-                        Filter::Topic(id) => self.data.topic(id).map(|t| t.name.clone()).unwrap_or_default(),
-                        Filter::Tag(id) => self.data.tag(id).map(|t| t.name.clone()).unwrap_or_default(),
+                    // collapse / expand the sidebar
+                    if icon::button(ui, Icon::Sidebar, 26.0, pal.txt, pal.card_hov).on_hover_text("Show / hide sidebar").clicked() {
+                        self.show_sidebar = !self.show_sidebar;
+                    }
+                    ui.add_space(2.0);
+                    let (title, title_icon) = match &self.filter {
+                        Filter::All => ("All PDFs".to_string(), Some(Icon::Library)),
+                        Filter::Unsorted => ("Unsorted".to_string(), Some(Icon::Inbox)),
+                        Filter::Topic(id) => (self.data.topic(id).map(|t| t.name.clone()).unwrap_or_default(), Some(Icon::Folder)),
+                        Filter::Tag(id) => (self.data.tag(id).map(|t| t.name.clone()).unwrap_or_default(), Some(Icon::Tag)),
                     };
-                    ui.heading(egui::RichText::new(title).color(TXT));
+                    if let Some(ic) = title_icon {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                        icon::draw(ui.painter(), ic, r, pal.txt);
+                    }
+                    ui.heading(egui::RichText::new(title).color(pal.txt));
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new(egui::RichText::new("+  Add PDFs").color(Color32::BLACK)).fill(ACCENT)).clicked() {
+                        if ui.add(egui::Button::new(egui::RichText::new("+  Add PDFs").color(Color32::BLACK)).fill(pal.accent)).clicked() {
                             if let Some(files) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_files() {
                                 self.add_pdfs(ctx, files);
                             }
                         }
-                        ui.add_space(6.0);
-                        ui.label(egui::RichText::new("Search:").color(TXT_DIM).size(12.0));
-                        ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(160.0).hint_text("name…"));
+                        ui.add_space(10.0);
+                        // search with a magnifier
+                        ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0).hint_text(egui::RichText::new("Search…").color(pal.txt_dim.gamma_multiply(0.55))));
+                        let (sr, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                        icon::draw(ui.painter(), Icon::Search, sr, pal.txt_dim);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        // segmented cover-size control
+                        ui.horizontal(|ui| {
+                            for (lbl, wv) in [("S", 128.0f32), ("M", 168.0), ("L", 212.0)] {
+                                let sel = (self.card_w - wv).abs() < 1.0;
+                                if ui.selectable_label(sel, lbl).clicked() {
+                                    self.card_w = wv;
+                                }
+                            }
+                        });
+                        // view mode toggle (only meaningful for All PDFs)
+                        if matches!(self.filter, Filter::All) {
+                            ui.separator();
+                            if icon::button(ui, Icon::Groups, 26.0, if self.lib_layout == LibLayout::Grouped { pal.accent } else { pal.txt_dim }, pal.card_hov).on_hover_text("Grouped by topic").clicked() {
+                                self.lib_layout = LibLayout::Grouped;
+                            }
+                            if icon::button(ui, Icon::Grid, 26.0, if self.lib_layout == LibLayout::Flat { pal.accent } else { pal.txt_dim }, pal.card_hov).on_hover_text("All in one grid").clicked() {
+                                self.lib_layout = LibLayout::Flat;
+                            }
+                        }
                     });
                 });
                 ui.add_space(10.0);
@@ -407,98 +632,105 @@ impl Folio {
                 if pdfs.is_empty() {
                     ui.add_space(60.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new("No PDFs here yet").color(TXT_DIM).size(15.0));
-                        ui.label(egui::RichText::new("Click “Add PDFs” to get started").color(TXT_DIM).size(12.0));
+                        ui.label(egui::RichText::new("No PDFs here yet").color(pal.txt_dim).size(15.0));
+                        ui.label(egui::RichText::new("Click “Add PDFs” to get started").color(pal.txt_dim).size(12.0));
                     });
                     return;
                 }
 
+                let grouped = matches!(self.filter, Filter::All) && self.lib_layout == LibLayout::Grouped;
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    self.ui_grid(ui, ctx, &pdfs);
+                    if grouped {
+                        self.ui_grouped(ui, ctx, &pdfs);
+                    } else {
+                        self.ui_grid(ui, ctx, &pdfs, "all");
+                    }
                 });
             });
     }
 
     fn ui_sidebar(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal;
         ui.add_space(10.0);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 0)).show(ui, |ui| {
             // filter rows
             let all_n = self.data.pdfs.len();
-            self.sidebar_row(ui, "All PDFs", Color32::from_rgb(0x5e, 0x5c, 0x59), all_n, matches!(self.filter, Filter::All), Filter::All);
-            let uns = self.data.pdfs.iter().filter(|p| p.topic_id.is_none()).count();
+            self.sidebar_row(ui, "All PDFs", Icon::Library, pal.txt_dim, all_n, matches!(self.filter, Filter::All), Filter::All);
+            let uns = self.data.pdfs.iter().filter(|p| p.topic_ids.is_empty()).count();
             if uns > 0 {
-                self.sidebar_row(ui, "Unsorted", Color32::from_rgb(0x3e, 0x3c, 0x39), uns, matches!(self.filter, Filter::Unsorted), Filter::Unsorted);
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("TOPICS").color(TXT_DIM).size(10.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("+").clicked() {
-                        self.show_new_topic = true;
-                        self.edit_name.clear();
-                        self.edit_color = PALETTE[0].to_string();
-                    }
-                });
-            });
-            let topics = self.data.topics.clone();
-            for t in &topics {
-                let n = self.data.pdfs.iter().filter(|p| p.topic_id.as_deref() == Some(t.id.as_str())).count();
-                let active = matches!(&self.filter, Filter::Topic(id) if id == &t.id);
-                let resp = self.sidebar_row(ui, &t.name, parse_hex(&t.color), n, active, Filter::Topic(t.id.clone()));
-                resp.context_menu(|ui| {
-                    if ui.button("Delete topic").clicked() {
-                        self.data.pdfs.iter_mut().for_each(|p| {
-                            if p.topic_id.as_deref() == Some(t.id.as_str()) { p.topic_id = None; }
-                        });
-                        self.data.topics.retain(|x| x.id != t.id);
-                        if matches!(&self.filter, Filter::Topic(id) if id == &t.id) { self.filter = Filter::All; }
-                        self.save();
-                        ui.close_menu();
-                    }
-                });
+                self.sidebar_row(ui, "Unsorted", Icon::Inbox, pal.txt_dim, uns, matches!(self.filter, Filter::Unsorted), Filter::Unsorted);
             }
 
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("TAGS").color(TXT_DIM).size(10.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("+").clicked() {
-                        self.show_new_tag = true;
-                        self.edit_name.clear();
-                        self.edit_color = PALETTE[1].to_string();
-                    }
-                });
-            });
-            let tags = self.data.tags.clone();
-            ui.horizontal_wrapped(|ui| {
-                for t in &tags {
-                    let active = matches!(&self.filter, Filter::Tag(id) if id == &t.id);
-                    let col = parse_hex(&t.color);
-                    let txt = egui::RichText::new(format!("● {}", t.name)).color(if active { col } else { TXT_DIM }).size(12.0);
-                    let resp = ui.add(egui::Button::new(txt).fill(if active { CARD_HOV } else { CARD }).stroke(Stroke::new(1.0_f32, if active { col } else { BORDER })));
-                    if resp.clicked() {
-                        self.filter = if active { Filter::All } else { Filter::Tag(t.id.clone()) };
-                    }
+            let (toggle, add) = self.section_header(ui, "TOPICS", self.show_topics);
+            if toggle { self.show_topics = !self.show_topics; }
+            if add {
+                self.show_new_topic = true;
+                self.edit_name.clear();
+                self.edit_color = PALETTE[0].to_string();
+            }
+            if self.show_topics {
+                let topics = self.data.topics.clone();
+                for t in &topics {
+                    let n = self.data.pdfs.iter().filter(|p| p.in_topic(&t.id)).count();
+                    let active = matches!(&self.filter, Filter::Topic(id) if id == &t.id);
+                    let resp = self.sidebar_row(ui, &t.name, Icon::Folder, parse_hex(&t.color), n, active, Filter::Topic(t.id.clone()));
                     resp.context_menu(|ui| {
-                        if ui.button("Delete tag").clicked() {
-                            self.data.pdfs.iter_mut().for_each(|p| p.tag_ids.retain(|x| x != &t.id));
-                            self.data.tags.retain(|x| x.id != t.id);
-                            if matches!(&self.filter, Filter::Tag(id) if id == &t.id) { self.filter = Filter::All; }
+                        if ui.button("Delete topic").clicked() {
+                            self.data.pdfs.iter_mut().for_each(|p| {
+                                p.topic_ids.retain(|x| x != &t.id);
+                            });
+                            self.data.topics.retain(|x| x.id != t.id);
+                            if matches!(&self.filter, Filter::Topic(id) if id == &t.id) { self.filter = Filter::All; }
                             self.save();
                             ui.close_menu();
                         }
                     });
                 }
-                if tags.is_empty() {
-                    ui.label(egui::RichText::new("No tags yet").color(TXT_DIM).size(11.0));
+                if topics.is_empty() {
+                    ui.label(egui::RichText::new("No topics yet").color(pal.txt_dim).size(11.0));
                 }
-            });
+            }
+
+            ui.add_space(10.0);
+            let (toggle, add) = self.section_header(ui, "TAGS", self.show_tags);
+            if toggle { self.show_tags = !self.show_tags; }
+            if add {
+                self.show_new_tag = true;
+                self.edit_name.clear();
+                self.edit_color = PALETTE[1].to_string();
+            }
+            if self.show_tags {
+                let tags = self.data.tags.clone();
+                ui.horizontal_wrapped(|ui| {
+                    for t in &tags {
+                        let active = matches!(&self.filter, Filter::Tag(id) if id == &t.id);
+                        let col = parse_hex(&t.color);
+                        let txt = egui::RichText::new(format!("● {}", t.name)).color(if active { col } else { pal.txt_dim }).size(12.0);
+                        let resp = ui.add(egui::Button::new(txt).fill(if active { pal.card_hov } else { pal.card }).stroke(Stroke::new(1.0_f32, if active { col } else { pal.border })));
+                        if resp.clicked() {
+                            self.filter = if active { Filter::All } else { Filter::Tag(t.id.clone()) };
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("Delete tag").clicked() {
+                                self.data.pdfs.iter_mut().for_each(|p| p.tag_ids.retain(|x| x != &t.id));
+                                self.data.tags.retain(|x| x.id != t.id);
+                                if matches!(&self.filter, Filter::Tag(id) if id == &t.id) { self.filter = Filter::All; }
+                                self.save();
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                    if tags.is_empty() {
+                        ui.label(egui::RichText::new("No tags yet").color(pal.txt_dim).size(11.0));
+                    }
+                });
+            }
         });
 
         // footer with export/import
         egui::TopBottomPanel::bottom("sb-foot")
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(10)))
+            .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::same(10)))
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Export").clicked() {
@@ -519,36 +751,62 @@ impl Folio {
                         }
                     }
                 });
-                ui.label(egui::RichText::new(format!("{} PDFs · {} topics · {} tags", self.data.pdfs.len(), self.data.topics.len(), self.data.tags.len())).color(TXT_DIM).size(11.0));
+                ui.label(egui::RichText::new(format!("{} PDFs · {} topics · {} tags", self.data.pdfs.len(), self.data.topics.len(), self.data.tags.len())).color(pal.txt_dim).size(11.0));
             });
     }
 
-    fn sidebar_row(&mut self, ui: &mut egui::Ui, label: &str, dot: Color32, count: usize, active: bool, target: Filter) -> egui::Response {
+    fn sidebar_row(&mut self, ui: &mut egui::Ui, label: &str, icon: Icon, tint: Color32, count: usize, active: bool, target: Filter) -> egui::Response {
+        let pal = self.pal;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
         let p = ui.painter();
         if active {
-            p.rect_filled(rect, CornerRadius::same(6), CARD_HOV);
+            p.rect_filled(rect, CornerRadius::same(6), pal.card_hov);
         } else if resp.hovered() {
-            p.rect_filled(rect, CornerRadius::same(6), CARD);
+            p.rect_filled(rect, CornerRadius::same(6), pal.card);
         }
         let cy = rect.center().y;
-        p.circle_filled(Pos2::new(rect.left() + 12.0, cy), 4.0, dot);
-        p.text(Pos2::new(rect.left() + 24.0, cy), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), if active { TXT } else { TXT_DIM });
-        p.text(Pos2::new(rect.right() - 8.0, cy), egui::Align2::RIGHT_CENTER, count.to_string(), egui::FontId::proportional(11.0), TXT_DIM);
+        let icon_rect = Rect::from_center_size(Pos2::new(rect.left() + 15.0, cy), Vec2::splat(16.0));
+        icon::draw(p, icon, icon_rect, if active { tint } else { tint.gamma_multiply(0.9) });
+        p.text(Pos2::new(rect.left() + 30.0, cy), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), if active { pal.txt } else { pal.txt_dim });
+        p.text(Pos2::new(rect.right() - 8.0, cy), egui::Align2::RIGHT_CENTER, count.to_string(), egui::FontId::proportional(11.0), pal.txt_dim);
         if resp.clicked() {
             self.filter = target;
         }
         resp
     }
 
-    fn ui_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, pdfs: &[PdfEntry]) {
-        let card_w = 156.0;
+    /// A collapsible sidebar section header (chevron + label + "add"). Returns
+    /// `(toggle_clicked, add_clicked)`.
+    fn section_header(&self, ui: &mut egui::Ui, label: &str, open: bool) -> (bool, bool) {
+        let pal = self.pal;
+        let mut toggle = false;
+        let mut add = false;
+        ui.horizontal(|ui| {
+            let chev = if open { Icon::Chevron } else { Icon::ChevronRight };
+            if icon::button(ui, chev, 18.0, pal.txt_dim, pal.card).clicked() {
+                toggle = true;
+            }
+            let lbl = ui.add(egui::Label::new(egui::RichText::new(label).color(pal.txt_dim).size(10.0).strong()).sense(Sense::click()));
+            if lbl.clicked() {
+                toggle = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon::button(ui, Icon::Plus, 18.0, pal.txt_dim, pal.card).clicked() {
+                    add = true;
+                }
+            });
+        });
+        (toggle, add)
+    }
+
+    fn ui_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, pdfs: &[PdfEntry], salt: &str) {
+        let card_w = self.card_w;
         let cover_h = card_w / 0.707;
         let spacing = 14.0;
         let avail = ui.available_width();
         let cols = ((avail + spacing) / (card_w + spacing)).floor().max(1.0) as usize;
 
-        egui::Grid::new("pdf-grid").spacing(Vec2::new(spacing, spacing)).show(ui, |ui| {
+        egui::Grid::new(("pdf-grid", salt)).spacing(Vec2::new(spacing, spacing)).show(ui, |ui| {
             for (i, pdf) in pdfs.iter().enumerate() {
                 self.ui_card(ui, ctx, pdf, card_w, cover_h);
                 if (i + 1) % cols == 0 {
@@ -558,13 +816,48 @@ impl Folio {
         });
     }
 
+    /// "All PDFs", grouped into topic sections (a PDF may appear under several).
+    fn ui_grouped(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, pdfs: &[PdfEntry]) {
+        let topics = self.data.topics.clone();
+        for t in &topics {
+            let group: Vec<PdfEntry> = pdfs.iter().filter(|p| p.in_topic(&t.id)).cloned().collect();
+            if group.is_empty() {
+                continue;
+            }
+            self.ui_group_header(ui, Icon::Folder, &t.name, parse_hex(&t.color), group.len());
+            self.ui_grid(ui, ctx, &group, &t.id);
+            ui.add_space(16.0);
+        }
+        let unsorted: Vec<PdfEntry> = pdfs.iter().filter(|p| p.topic_ids.is_empty()).cloned().collect();
+        if !unsorted.is_empty() {
+            self.ui_group_header(ui, Icon::Inbox, "Unsorted", self.pal.txt_dim, unsorted.len());
+            self.ui_grid(ui, ctx, &unsorted, "unsorted");
+        }
+    }
+
+    fn ui_group_header(&self, ui: &mut egui::Ui, ic: Icon, name: &str, accent: Color32, count: usize) {
+        let pal = self.pal;
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+            icon::draw(ui.painter(), ic, r, accent);
+            ui.label(egui::RichText::new(name).color(pal.txt).size(14.0).strong());
+            ui.label(egui::RichText::new(count.to_string()).color(pal.txt_dim).size(12.0));
+        });
+        let sep_y = ui.cursor().top() + 2.0;
+        ui.painter().hline(ui.max_rect().x_range(), sep_y, Stroke::new(1.0_f32, pal.border));
+        ui.add_space(8.0);
+    }
+
     fn ui_card(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, pdf: &PdfEntry, w: f32, cover_h: f32) {
+        let pal = self.pal;
         let total_h = cover_h + 46.0;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, total_h), Sense::click());
+        let popup_id = egui::Id::new(("card-menu", pdf.id.as_str()));
+        let popup_open = ui.memory(|m| m.is_popup_open(popup_id));
         let p = ui.painter().clone();
-        let hovered = resp.hovered();
-        p.rect_filled(rect, CornerRadius::same(10), if hovered { CARD_HOV } else { CARD });
-        p.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0_f32, if hovered { parse_hex("#3a3a42") } else { BORDER }), egui::StrokeKind::Inside);
+        let active = resp.hovered() || popup_open;
+        p.rect_filled(rect, CornerRadius::same(10), if active { pal.card_hov } else { pal.card });
+        p.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0_f32, if active { pal.accent.gamma_multiply(0.6) } else { pal.border }), egui::StrokeKind::Inside);
 
         let cover_rect = Rect::from_min_size(rect.min, Vec2::new(w, cover_h));
 
@@ -576,57 +869,96 @@ impl Folio {
                 p.image(tex.id(), cover_rect.shrink(1.0), uv, Color32::WHITE);
             }
             Some(Cover::Failed) => {
-                p.text(cover_rect.center(), egui::Align2::CENTER_CENTER, "PDF", egui::FontId::proportional(20.0), TXT_DIM);
+                p.text(cover_rect.center(), egui::Align2::CENTER_CENTER, "PDF", egui::FontId::proportional(20.0), pal.txt_dim);
             }
             _ => {
-                p.text(cover_rect.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(20.0), TXT_DIM);
+                p.text(cover_rect.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(20.0), pal.txt_dim);
             }
+        }
+
+        // topic chips overlaid on the cover, tinted with the topic colour
+        let topic_chips: Vec<(String, Color32)> = pdf
+            .topic_ids
+            .iter()
+            .filter_map(|id| self.data.topic(id))
+            .map(|t| (t.name.clone(), parse_hex(&t.color)))
+            .collect();
+        if let Some((name, col)) = topic_chips.first() {
+            let label = elide(name, 16);
+            let font = egui::FontId::proportional(10.0);
+            let galley = p.layout_no_wrap(label.clone(), font.clone(), Color32::WHITE);
+            let extra = if topic_chips.len() > 1 { format!("  +{}", topic_chips.len() - 1) } else { String::new() };
+            let cw = (galley.size().x + 14.0 + extra.len() as f32 * 6.0).min(w - 12.0);
+            let chip = Rect::from_min_size(Pos2::new(cover_rect.left() + 6.0, cover_rect.bottom() - 22.0), Vec2::new(cw, 16.0));
+            p.rect_filled(chip, CornerRadius::same(8), col.gamma_multiply(0.9));
+            p.text(chip.left_center() + Vec2::new(7.0, 0.0), egui::Align2::LEFT_CENTER, format!("{label}{extra}"), font, Color32::from_rgb(0x1a, 0x18, 0x14));
         }
 
         // name + meta
         let name_pos = Pos2::new(rect.left() + 9.0, cover_rect.bottom() + 8.0);
-        let name = elide(&pdf.name, 22);
-        p.text(name_pos, egui::Align2::LEFT_TOP, name, egui::FontId::proportional(12.0), TXT);
-        let meta = if let Some(t) = pdf.topic_id.as_ref().and_then(|id| self.data.topic(id)) {
-            format!("{} · {}", fmt_size(pdf.size), t.name)
-        } else {
-            fmt_size(pdf.size)
+        p.text(name_pos, egui::Align2::LEFT_TOP, elide(&pdf.name, 22), egui::FontId::proportional(12.0), pal.txt);
+        let meta = match topic_chips.len() {
+            0 => fmt_size(pdf.size),
+            1 => format!("{} · {}", fmt_size(pdf.size), topic_chips[0].0),
+            n => format!("{} · {n} topics", fmt_size(pdf.size)),
         };
-        p.text(Pos2::new(rect.left() + 9.0, cover_rect.bottom() + 26.0), egui::Align2::LEFT_TOP, elide(&meta, 26), egui::FontId::proportional(10.5), TXT_DIM);
+        p.text(Pos2::new(rect.left() + 9.0, cover_rect.bottom() + 26.0), egui::Align2::LEFT_TOP, elide(&meta, 26), egui::FontId::proportional(10.5), pal.txt_dim);
 
         if !pdf.exists {
             p.text(Pos2::new(rect.left() + 6.0, rect.top() + 6.0), egui::Align2::LEFT_TOP, "⚠ missing", egui::FontId::proportional(10.0), Color32::from_rgb(0xd9, 0x65, 0x65));
         }
 
-        if resp.clicked() {
+        // hover overflow (three-dots) button → same menu as right-click
+        let dots_rect = Rect::from_min_size(Pos2::new(cover_rect.right() - 26.0, cover_rect.top() + 6.0), Vec2::splat(20.0));
+        let dots_resp = ui.interact(dots_rect, popup_id.with("dots"), Sense::click());
+        if active {
+            p.rect_filled(dots_rect, CornerRadius::same(6), pal.panel.gamma_multiply(0.92));
+            p.rect_stroke(dots_rect, CornerRadius::same(6), Stroke::new(1.0_f32, pal.border), egui::StrokeKind::Inside);
+            icon::draw(&p, Icon::DotsV, dots_rect, pal.txt);
+        }
+        if dots_resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup_below_widget(ui, popup_id, &dots_resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            ui.set_min_width(190.0);
+            self.card_menu(ui, pdf);
+        });
+
+        // open the reader on a plain card click (not when using the ⋯ menu)
+        if resp.clicked() && !dots_resp.hovered() && !popup_open {
             self.open_reader(pdf);
         }
         resp.context_menu(|ui| self.card_menu(ui, pdf));
     }
 
     fn card_menu(&mut self, ui: &mut egui::Ui, pdf: &PdfEntry) {
+        let pal = self.pal;
         if ui.button("Open").clicked() {
             self.open_reader(pdf);
             ui.close_menu();
         }
         ui.separator();
-        ui.label(egui::RichText::new("Topic").color(TXT_DIM).size(10.0));
+        ui.label(egui::RichText::new("Topics").color(pal.txt_dim).size(10.0));
         let topics = self.data.topics.clone();
-        let cur = pdf.topic_id.clone();
-        if ui.selectable_label(cur.is_none(), "None").clicked() {
-            if let Some(p) = self.data.pdfs.iter_mut().find(|p| p.id == pdf.id) { p.topic_id = None; }
-            self.save();
-            ui.close_menu();
-        }
+        // Multi-select: a PDF can belong to several topics at once.
         for t in &topics {
-            if ui.selectable_label(cur.as_deref() == Some(t.id.as_str()), &t.name).clicked() {
-                if let Some(p) = self.data.pdfs.iter_mut().find(|p| p.id == pdf.id) { p.topic_id = Some(t.id.clone()); }
+            let has = pdf.in_topic(&t.id);
+            if ui.selectable_label(has, &t.name).clicked() {
+                if let Some(p) = self.data.pdfs.iter_mut().find(|p| p.id == pdf.id) {
+                    if has { p.topic_ids.retain(|x| x != &t.id); } else { p.topic_ids.push(t.id.clone()); }
+                }
                 self.save();
-                ui.close_menu();
             }
         }
+        if ui.button(egui::RichText::new("+ New topic…").color(pal.accent)).clicked() {
+            self.show_new_topic = true;
+            self.edit_name.clear();
+            self.edit_color = PALETTE[0].to_string();
+            self.pending_topic_pdf = Some(pdf.id.clone());
+            ui.close_menu();
+        }
         ui.separator();
-        ui.label(egui::RichText::new("Tags").color(TXT_DIM).size(10.0));
+        ui.label(egui::RichText::new("Tags").color(pal.txt_dim).size(10.0));
         let tags = self.data.tags.clone();
         for t in &tags {
             let has = pdf.tag_ids.contains(&t.id);
@@ -667,35 +999,43 @@ impl Folio {
 
     // ── Modals ──────────────────────────────────────────────────────────────
     fn ui_modals(&mut self, ctx: &egui::Context) {
+        let pal = self.pal;
         if self.show_new_topic {
             let mut open = true;
             let mut create = false;
             egui::Window::new("New Topic").collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.edit_name).hint_text("Topic name"));
+                ui.add(egui::TextEdit::singleline(&mut self.edit_name).hint_text(egui::RichText::new("Topic name").color(pal.txt_dim.gamma_multiply(0.55))));
                 ui.add_space(6.0);
-                color_picker(ui, &mut self.edit_color);
+                color_picker(ui, &pal, &mut self.edit_color);
                 ui.add_space(10.0);
-                if ui.add(egui::Button::new(egui::RichText::new("Create").color(Color32::BLACK)).fill(ACCENT)).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new("Create").color(Color32::BLACK)).fill(pal.accent)).clicked() {
                     create = true;
                 }
             });
             if create && !self.edit_name.trim().is_empty() {
-                self.data.topics.push(Topic { id: uuid::Uuid::new_v4().to_string(), name: self.edit_name.trim().to_string(), color: self.edit_color.clone() });
+                let id = uuid::Uuid::new_v4().to_string();
+                self.data.topics.push(Topic { id: id.clone(), name: self.edit_name.trim().to_string(), color: self.edit_color.clone() });
+                // If launched from a PDF's menu, assign the new topic to it.
+                if let Some(pdf_id) = self.pending_topic_pdf.take() {
+                    if let Some(p) = self.data.pdfs.iter_mut().find(|p| p.id == pdf_id) {
+                        if !p.topic_ids.contains(&id) { p.topic_ids.push(id); }
+                    }
+                }
                 self.save();
                 self.show_new_topic = false;
             }
-            if !open { self.show_new_topic = false; }
+            if !open { self.show_new_topic = false; self.pending_topic_pdf = None; }
         }
 
         if self.show_new_tag {
             let mut open = true;
             let mut create = false;
             egui::Window::new("New Tag").collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.edit_name).hint_text("Tag name"));
+                ui.add(egui::TextEdit::singleline(&mut self.edit_name).hint_text(egui::RichText::new("Tag name").color(pal.txt_dim.gamma_multiply(0.55))));
                 ui.add_space(6.0);
-                color_picker(ui, &mut self.edit_color);
+                color_picker(ui, &pal, &mut self.edit_color);
                 ui.add_space(10.0);
-                if ui.add(egui::Button::new(egui::RichText::new("Create").color(Color32::BLACK)).fill(ACCENT)).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new("Create").color(Color32::BLACK)).fill(pal.accent)).clicked() {
                     create = true;
                 }
             });
@@ -710,29 +1050,35 @@ impl Folio {
 
     // ── Reader ──────────────────────────────────────────────────────────────
     fn ui_reader(&mut self, ctx: &egui::Context) {
+        let pal = self.pal;
         // toolbar
         let mut zoom_delta = 0.0f32;
         let mut do_copy = false;
+        let mut toggle_outline = false;
         egui::TopBottomPanel::top("reader-tb")
             .exact_height(40.0)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 0)))
+            .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
+                    if icon::button(ui, Icon::Contents, 26.0, pal.txt, pal.card_hov).on_hover_text("Show / hide contents").clicked() {
+                        toggle_outline = true;
+                    }
+                    ui.separator();
                     if let Some(r) = &mut self.reader {
                         let total = if r.page_count == 0 { "…".to_string() } else { r.page_count.to_string() };
-                        ui.label(egui::RichText::new(format!("Page {} / {}", r.current_page, total)).color(TXT_DIM).size(12.0));
+                        ui.label(egui::RichText::new(format!("Page {} / {}", r.current_page, total)).color(pal.txt_dim).size(12.0));
                         ui.separator();
                         if ui.button(" −  ").clicked() { zoom_delta = -0.2; }
-                        ui.label(egui::RichText::new(format!("{}%", (r.zoom * 100.0).round() as i32)).color(TXT_DIM).size(12.0));
+                        ui.label(egui::RichText::new(format!("{}%", (r.zoom * 100.0).round() as i32)).color(pal.txt_dim).size(12.0));
                         if ui.button(" +  ").clicked() { zoom_delta = 0.2; }
                         ui.separator();
-                        ui.label(egui::RichText::new("Highlight:").color(TXT_DIM).size(12.0));
+                        ui.label(egui::RichText::new("Highlight:").color(pal.txt_dim).size(12.0));
                         for c in HL_COLORS {
                             let sel = &r.hl_color == c;
                             let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
                             ui.painter().circle_filled(rect.center(), 8.0, parse_hex(c));
                             if sel {
-                                ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(2.0_f32, TXT));
+                                ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(2.0_f32, pal.txt));
                             }
                             if resp.clicked() { r.hl_color = c.to_string(); }
                         }
@@ -744,6 +1090,9 @@ impl Folio {
                 });
             });
 
+        if toggle_outline {
+            self.show_outline = !self.show_outline;
+        }
         if zoom_delta != 0.0 {
             if let Some(r) = &mut self.reader {
                 r.zoom = (r.zoom + zoom_delta).clamp(0.5, 4.0);
@@ -774,11 +1123,75 @@ impl Folio {
             if zout { r.zoom = (r.zoom - 0.2).clamp(0.5, 4.0); }
         }
 
+        // Okular-style contents panel: jump-to-page + table of contents.
+        if self.show_outline {
+            egui::SidePanel::left("outline")
+                .default_width(240.0)
+                .width_range(170.0..=440.0)
+                .resizable(true)
+                .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::same(10)))
+                .show(ctx, |ui| self.ui_outline(ui));
+        }
+
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(PAGE_BG))
+            .frame(egui::Frame::new().fill(pal.page_bg))
             .show(ctx, |ui| {
                 self.ui_pages(ui, ctx);
             });
+    }
+
+    fn ui_outline(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal;
+        let Some(r) = self.reader.as_mut() else { return };
+
+        // Jump-to-page box.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Page").color(pal.txt_dim).size(12.0));
+            let resp = ui.add(egui::TextEdit::singleline(&mut r.jump_input).desired_width(48.0).hint_text(egui::RichText::new("#").color(pal.txt_dim.gamma_multiply(0.55))));
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let go = ui.small_button("Go").clicked();
+            if (enter || go) && r.page_count > 0 {
+                if let Ok(n) = r.jump_input.trim().parse::<u32>() {
+                    r.scroll_to_page = Some(n.clamp(1, r.page_count));
+                }
+            }
+            ui.label(egui::RichText::new(format!("/ {}", if r.page_count == 0 { "…".into() } else { r.page_count.to_string() })).color(pal.txt_dim).size(11.0));
+        });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        if r.outline.is_empty() {
+            ui.label(egui::RichText::new("No table of contents").color(pal.txt_dim).size(11.0));
+            return;
+        }
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            icon::draw(ui.painter(), Icon::Contents, r, pal.txt_dim);
+            ui.label(egui::RichText::new("CONTENTS").color(pal.txt_dim).size(10.0).strong());
+        });
+        ui.add_space(4.0);
+
+        let mut jump: Option<u32> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for it in &r.outline {
+                ui.horizontal(|ui| {
+                    ui.add_space(it.level as f32 * 12.0);
+                    let color = if it.page.is_some() { pal.txt } else { pal.txt_dim };
+                    let label = egui::Label::new(egui::RichText::new(&it.title).size(12.0).color(color))
+                        .truncate()
+                        .sense(Sense::click());
+                    if ui.add(label).clicked() {
+                        if let Some(p) = it.page {
+                            jump = Some(p + 1); // outline pages are 0-based
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(p) = jump {
+            r.scroll_to_page = Some(p.clamp(1, r.page_count.max(1)));
+        }
     }
 
     /// Ctrl/⌘ + scroll (or trackpad pinch) zoom, anchored under the cursor.
@@ -804,10 +1217,11 @@ impl Folio {
     }
 
     fn ui_pages(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let pal = self.pal;
         // Ctrl/⌘ + scroll (or trackpad pinch) zooms, anchored under the cursor —
         // must run before we snapshot `zoom`, and it may force a scroll offset.
         let viewport_top = ui.max_rect().top();
-        let forced_offset = self.apply_scroll_zoom(ctx, viewport_top);
+        let mut forced_offset = self.apply_scroll_zoom(ctx, viewport_top);
 
         let Some(reader) = self.reader.as_ref() else { return };
 
@@ -819,7 +1233,7 @@ impl Folio {
         }
         if reader.page_count == 0 {
             ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new("Opening…").color(TXT_DIM).size(14.0));
+                ui.label(egui::RichText::new("Opening…").color(pal.txt_dim).size(14.0));
             });
             ctx.request_repaint();
             return;
@@ -838,10 +1252,24 @@ impl Folio {
         let mut new_selection: Option<Selection> = None;
         let mut save_highlight: Option<PdfHighlight> = None;
         let mut remove_highlight: Option<String> = None;
+        let mut start_confirm: Option<(String, Pos2)> = None; // clicked a highlight → ask
         let mut deselect = false; // a plain click on empty text clears the selection
         let mut requests: Vec<Req> = Vec::new();
         let mut top_visible_page = reader.current_page;
         let mut first_visible_set = false;
+
+        // A pending page jump (from the contents panel) wins over zoom anchoring:
+        // sum the heights of the pages above the target to get its scroll offset.
+        if let Some(target) = reader.scroll_to_page.take() {
+            let mut y = 12.0f32; // matches the top padding added before the first page
+            let n = (target.saturating_sub(1) as usize).min(reader.pages.len());
+            for slot in &reader.pages[..n] {
+                let (_, h) = slot.size_pts.unwrap_or(default_size);
+                y += h * zoom + 10.0; // page height + inter-page spacing
+            }
+            forced_offset = Some(y);
+            reader.current_page = target;
+        }
 
         let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -887,7 +1315,7 @@ impl Folio {
                             if let Some(tex) = &slot.texture {
                                 p.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                             } else {
-                                p.text(rect.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(18.0), TXT_DIM);
+                                p.text(rect.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(18.0), pal.txt_dim);
                             }
 
                             // draw stored highlights for this page
@@ -908,13 +1336,12 @@ impl Folio {
                             if let Some(sel) = &reader.selection {
                                 if sel.page == idx + 1 {
                                     if let (Some(chars), Some(lines)) = (&slot.chars, &slot.lines) {
-                                        let pad_x = 1.0;
                                         for (x0, y0, x1, y1) in selection_rects(chars, lines, sel.start, sel.end) {
                                             let sr = Rect::from_min_max(
-                                                Pos2::new(rect.left() + x0 * zoom - pad_x, rect.top() + y0 * zoom),
-                                                Pos2::new(rect.left() + x1 * zoom + pad_x, rect.top() + y1 * zoom),
+                                                Pos2::new(rect.left() + x0 * zoom, rect.top() + y0 * zoom),
+                                                Pos2::new(rect.left() + x1 * zoom, rect.top() + y1 * zoom),
                                             );
-                                            p.rect_filled(sr, CornerRadius::same(2), SELECT_FILL);
+                                            p.rect_filled(sr, CornerRadius::same(2), pal.select_fill);
                                         }
                                     }
                                 }
@@ -977,10 +1404,11 @@ impl Folio {
                                         }
                                     }
                                 } else if resp.clicked() {
-                                    // A plain click removes a highlight, or clears the selection.
+                                    // Click a highlight → ask for confirmation near the
+                                    // cursor; click empty text → clear the selection.
                                     if let Some(pos) = resp.interact_pointer_pos() {
                                         match over_highlight(pos) {
-                                            Some(id) => remove_highlight = Some(id),
+                                            Some(id) => start_confirm = Some((id, pos)),
                                             None => deselect = true,
                                         }
                                     }
@@ -1016,8 +1444,13 @@ impl Folio {
 
         if let Some(sel) = new_selection {
             reader.selection = Some(sel);
+            reader.pending_delete = None; // starting a selection dismisses the prompt
         } else if deselect {
             reader.selection = None;
+            reader.pending_delete = None;
+        }
+        if let Some((id, pos)) = start_confirm {
+            reader.pending_delete = Some((id, pos));
         }
         reader.current_page = top_visible_page;
 
@@ -1037,7 +1470,7 @@ impl Folio {
         let mut clear_selection = false;
         if let Some((page, start, end, chars, lines, (w_pts, h_pts))) = sel_snapshot {
             egui::Area::new(egui::Id::new("hl-fab")).anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0]).show(ctx, |ui| {
-                egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                egui::Frame::new().fill(pal.card).stroke(Stroke::new(1.0_f32, pal.border)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.add(egui::Button::new(egui::RichText::new("Highlight selection").color(Color32::BLACK)).fill(parse_hex(&hl_color))).clicked() {
                             if let (Some(chars), Some(lines)) = (&chars, &lines) {
@@ -1056,6 +1489,43 @@ impl Folio {
         }
         if clear_selection {
             reader.selection = None;
+        }
+
+        // Delete-confirmation popup, anchored just off the cursor where the
+        // highlight was clicked. Nothing is removed until "Delete" is pressed.
+        if let Some((id, pos)) = reader.pending_delete.clone() {
+            let mut confirm = false;
+            let mut cancel = false;
+            egui::Area::new(egui::Id::new("hl-del"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos + Vec2::new(8.0, 8.0))
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(pal.card)
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("Delete this highlight?").color(pal.txt).size(13.0));
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::Button::new(egui::RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xc0, 0x4a, 0x4a))).clicked() {
+                                        confirm = true;
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        cancel = true;
+                                    }
+                                });
+                            });
+                        });
+                });
+            if confirm {
+                remove_highlight = Some(id);
+                reader.pending_delete = None;
+            } else if cancel {
+                reader.pending_delete = None;
+            }
         }
 
         for req in requests {
@@ -1078,16 +1548,18 @@ impl Folio {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-fn setup_style(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.override_text_color = Some(TXT);
-    visuals.panel_fill = BG;
-    visuals.window_fill = PANEL;
-    visuals.extreme_bg_color = CARD;
-    visuals.widgets.inactive.bg_fill = CARD;
-    visuals.widgets.hovered.bg_fill = CARD_HOV;
-    visuals.widgets.active.bg_fill = CARD_HOV;
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+fn setup_style(ctx: &egui::Context, pal: &Pal, dark: bool) {
+    let mut visuals = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    visuals.override_text_color = Some(pal.txt);
+    visuals.panel_fill = pal.bg;
+    visuals.window_fill = pal.panel;
+    visuals.window_stroke = Stroke::new(1.0_f32, pal.border);
+    visuals.extreme_bg_color = pal.card;
+    visuals.widgets.inactive.bg_fill = pal.card;
+    visuals.widgets.hovered.bg_fill = pal.card_hov;
+    visuals.widgets.active.bg_fill = pal.card_hov;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal.border);
+    visuals.selection.bg_fill = pal.accent.gamma_multiply(0.35);
     ctx.set_visuals(visuals);
 }
 
@@ -1095,14 +1567,14 @@ fn upload(ctx: &egui::Context, name: &str, img: ColorImage) -> TextureHandle {
     ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
 }
 
-fn color_picker(ui: &mut egui::Ui, current: &mut String) {
+fn color_picker(ui: &mut egui::Ui, pal: &Pal, current: &mut String) {
     ui.horizontal_wrapped(|ui| {
         for c in PALETTE {
             let sel = current == c;
             let (rect, resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
             ui.painter().circle_filled(rect.center(), 11.0, parse_hex(c));
             if sel {
-                ui.painter().circle_stroke(rect.center(), 12.0, Stroke::new(2.0_f32, TXT));
+                ui.painter().circle_stroke(rect.center(), 12.0, Stroke::new(2.0_f32, pal.txt));
             }
             if resp.clicked() {
                 *current = c.to_string();
@@ -1258,14 +1730,31 @@ fn selection_rects(chars: &[CharBox], lines: &[LineBox], a: usize, b: usize) -> 
         if s >= e {
             continue;
         }
-        let mut x0 = f32::MAX;
-        let mut x1 = f32::MIN;
+        // Walk the line's selected glyphs, merging them into a single row and
+        // filling the small gaps between words. A gap wider than a couple of line
+        // heights is treated as a column gutter (or table cell break): flush the
+        // current run and start a new rect, so two columns never fuse into one bar.
+        let gutter = (l.bottom - l.top).max(1.0) * 2.0;
+        let mut cur: Option<(f32, f32)> = None; // (x0, x1) of the run in progress
+        let mut prev_right = f32::MIN;
         for c in &chars[s..e] {
-            x0 = x0.min(c.x);
-            x1 = x1.max(c.x + c.w);
+            let (cl, cr) = (c.x, c.x + c.w);
+            cur = match cur {
+                Some((x0, x1)) if cl - prev_right <= gutter => Some((x0.min(cl), x1.max(cr))),
+                Some((x0, x1)) => {
+                    if x1 > x0 {
+                        rects.push((x0, l.top, x1, l.bottom));
+                    }
+                    Some((cl, cr))
+                }
+                None => Some((cl, cr)),
+            };
+            prev_right = prev_right.max(cr);
         }
-        if x1 > x0 {
-            rects.push((x0, l.top, x1, l.bottom));
+        if let Some((x0, x1)) = cur {
+            if x1 > x0 {
+                rects.push((x0, l.top, x1, l.bottom));
+            }
         }
     }
     rects

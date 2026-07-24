@@ -57,9 +57,14 @@ fn build_lines(chars: &[CharBox]) -> Vec<LineBox> {
         while i < chars.len() {
             let c = &chars[i];
             let (c_top, c_bottom) = (c.y, c.y + c.h);
+            let c_center = (c_top + c_bottom) * 0.5;
+            let line_center = (top + bottom) * 0.5;
             let overlap = bottom.min(c_bottom) - top.max(c_top);
             let min_h = (bottom - top).min(c.h).max(1.0);
-            if overlap > 0.5 * min_h {
+            let joins = overlap > 0.5 * min_h
+                || (c_center >= top && c_center <= bottom)
+                || (line_center >= c_top && line_center <= c_bottom);
+            if joins {
                 top = top.min(c_top);
                 bottom = bottom.max(c_bottom);
                 left = left.min(c.x);
@@ -86,6 +91,16 @@ fn main() {
     let doc = pdfium.load_pdf_from_file(path, None).expect("open");
     let pages = doc.pages();
     let page = pages.get(page_idx).expect("page");
+
+    if let Ok(media) = page.boundaries().media() {
+        let b = media.bounds;
+        println!("MediaBox: left={} bottom={} right={} top={}", b.left.value, b.bottom.value, b.right.value, b.top.value);
+    }
+    if let Ok(crop) = page.boundaries().crop() {
+        let b = crop.bounds;
+        println!("CropBox:  left={} bottom={} right={} top={}", b.left.value, b.bottom.value, b.right.value, b.top.value);
+    }
+    println!("rotation: {:?}", page.rotation());
 
     let chars = char_boxes(&page);
     let lines = build_lines(&chars);

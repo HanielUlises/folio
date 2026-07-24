@@ -10,7 +10,7 @@
 //! Covers are additionally cached to disk as PNGs keyed by path + mtime + size,
 //! so a library opens instantly on every launch after the first.
 
-use crate::pdf::{CharBox, Doc, Engine};
+use crate::pdf::{CharBox, Doc, Engine, OutlineItem};
 use eframe::egui::{self, ColorImage};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -43,6 +43,10 @@ pub enum Res {
         path: String,
         page_count: u32,
         first_size: (f32, f32),
+    },
+    Outline {
+        path: String,
+        items: Vec<OutlineItem>,
     },
     OpenFailed {
         path: String,
@@ -156,11 +160,13 @@ fn handle(
             match ensure_open(engine, open, &path) {
                 Ok(d) => {
                     let first = d.page_size(0).unwrap_or((595.0, 842.0));
+                    let items = d.outline();
                     let _ = tx.send(Res::Opened {
-                        path,
+                        path: path.clone(),
                         page_count: d.page_count,
                         first_size: first,
                     });
+                    let _ = tx.send(Res::Outline { path, items });
                 }
                 Err(e) => {
                     let _ = tx.send(Res::OpenFailed { path, err: e });
