@@ -65,6 +65,7 @@ jobs:
           $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
           Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
           tar -xzf pdfium.tgz bin/pdfium.dll
+          if (-not (Test-Path bin/pdfium.dll)) { throw "pdfium.dll was not extracted from the archive" }
 
       - name: Package
         shell: pwsh
