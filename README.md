@@ -1,27 +1,29 @@
 # Folio
 
-Offline PDF reader and library manager for Linux (and other desktops).
+Folio is a PDF reader and library manager written in Rust. It targets Linux and other desktop platforms.
 
-Native Rust application built with egui/eframe (GPU-accelerated, no webview) and pdfium-render. All rendering, text extraction, thumbnails and search happen in-process. No web frontend, no pdf.js, no CDN, and no network access at runtime.
+The application is built with egui/eframe for the interface and pdfium-render for PDF handling. Rendering, text extraction, thumbnail generation and search are performed entirely in-process.
 
 ## Features
 
-- Library grid with rendered PDF covers. Covers are generated on a background thread and cached to disk.
-- Topics — one colour-coded category per PDF, shown in the sidebar. Sort and filter by topic.
-- Tags — multiple colour-coded labels per PDF with one-click filtering.
-- Reader with lazy per-page rendering, zoom, page navigation and smooth scrolling. Off-screen page textures are freed to keep memory usage bounded.
-- Text selection — drag to select text on the page; copy with the toolbar button or Ctrl+C.
-- Highlighting in five colours. Highlights are stored as normalised page coordinates so they stay aligned at any zoom. Click a highlight to remove it.
-- Portable data — export / import the full library (topics, tags, entries, highlights) as a single JSON file. Data lives in the OS app-data directory as `folio-data.json`.
+The library view presents a grid of PDF covers. Covers are rendered on a background thread and cached on disk so that subsequent launches remain responsive.
+
+Documents may be organised with a single topic (colour-coded and shown in the sidebar) and any number of tags. Both topics and tags support filtering.
+
+The reader performs lazy per-page rendering and supports zoom, navigation and continuous scrolling. Unused page textures are released to limit memory consumption.
+
+Text can be selected directly on the page and copied. Highlights in five colours are stored as normalised page coordinates and remain correctly aligned at any zoom level. Highlights may be removed by clicking them.
+
+The complete library state (topics, tags, document entries and highlights) can be exported or imported as a single JSON file. Persistent data is stored in the platform application data directory as `folio-data.json`.
+
+## Download
+
+Pre-built Linux binaries are available from the [Releases](https://github.com/<user>/<repo>/releases) page. Extract the archive and run the `folio` executable. The required `libpdfium.so` is included.
 
 ## Requirements
 
-- Rust (pinned to 1.97.1 via `rust-toolchain.toml`)
-- Working OpenGL stack (uses the glow backend; X11 and Wayland supported)
-- `libpdfium.so` (vendored under `src-tauri/pdfium/`)
+- Rust 1.97.1 (specified in `rust-toolchain.toml`)
+- A working OpenGL implementation (X11 or Wayland)
+- `libpdfium.so` (provided in the release package or under `src-tauri/pdfium/` when building from source)
 
-At runtime Folio searches for the pdfium library in this order:
-1. `$FOLIO_PDFIUM_DIR`
-2. Directory of the executable (and its `pdfium/` subdirectory)
-3. Vendored `src-tauri/pdfium/`
-4. System library path
+At runtime the application searches for the pdfium library in the following order: `$FOLIO_PDFIUM_DIR`, the directory containing the executable (including a `pdfium/` subdirectory), the vendored copy under `src-tauri/pdfium/`, and finally the system library path.
