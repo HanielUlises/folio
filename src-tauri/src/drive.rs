@@ -27,6 +27,7 @@ fn data_dir() -> PathBuf {
 }
 fn creds_path() -> PathBuf { data_dir().join("drive-credentials.json") }
 fn tokens_path() -> PathBuf { data_dir().join("drive-tokens.json") }
+fn recents_path() -> PathBuf { data_dir().join("drive-recents.json") }
 /// Where downloaded Drive PDFs are cached for offline reading.
 pub fn cache_dir() -> PathBuf { data_dir().join("drive-cache") }
 
@@ -60,6 +61,8 @@ pub struct Tokens {
     pub refresh_token: String,
     #[serde(default)]
     pub expiry: u64, // unix seconds
+    #[serde(default)]
+    pub email: String, // signed-in account, cached for offline display
 }
 
 impl Tokens {
@@ -97,7 +100,7 @@ pub fn connect(creds: &Credentials) -> Result<Tokens, String> {
 
     let auth = format!(
         "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}\
-         &code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
+         &code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=select_account%20consent",
         enc(&creds.client_id), enc(&redirect), enc(SCOPE), challenge,
     );
     open_browser(&auth);
@@ -117,6 +120,7 @@ pub fn connect(creds: &Credentials) -> Result<Tokens, String> {
         access_token: v["access_token"].as_str().ok_or("no access_token in response")?.to_string(),
         refresh_token: v["refresh_token"].as_str().unwrap_or_default().to_string(),
         expiry: now() + v["expires_in"].as_u64().unwrap_or(3600),
+        email: String::new(),
     };
     tokens.save();
     Ok(tokens)
@@ -135,6 +139,8 @@ pub fn refresh(creds: &Credentials, refresh_token: &str) -> Result<Tokens, Strin
         access_token: v["access_token"].as_str().ok_or("no access_token in refresh")?.to_string(),
         refresh_token: refresh_token.to_string(),
         expiry: now() + v["expires_in"].as_u64().unwrap_or(3600),
+        // Preserve the cached account name across token refreshes.
+        email: Tokens::load().map(|t| t.email).unwrap_or_default(),
     };
     tokens.save();
     Ok(tokens)
@@ -160,11 +166,13 @@ pub fn account_email(access_token: &str) -> Result<String, String> {
     Ok(v["user"]["emailAddress"].as_str().unwrap_or("unknown").to_string())
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DriveFile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub size: u64,
+    #[serde(default)]
     pub modified: String,
 }
 
@@ -224,7 +232,17 @@ pub struct DriveState {
     creds: Option<Credentials>,
     tokens: Option<Tokens>,
     rx: Option<Receiver<Job>>,
+    /// Silent background refresh of the signed-in account name; never flips the
+    /// connection to an error state if it fails.
+    account_rx: Option<Receiver<(Tokens, String)>>,
+    download_rx: Option<Receiver<Result<(DriveFile, PathBuf), String>>>,
+    /// Filename currently downloading (drives the loading overlay).
+    pub downloading: Option<String>,
+    /// A finished download the UI should now open in the reader.
+    pub just_downloaded: Option<(DriveFile, PathBuf)>,
     pub files: Vec<DriveFile>,
+    /// Recently opened Drive documents, most-recent first (quick access).
+    pub recents: Vec<DriveFile>,
     pub browsing: bool,
 }
 
@@ -232,18 +250,58 @@ impl DriveState {
     pub fn new() -> Self {
         let creds = Credentials::load();
         let tokens = Tokens::load();
-        let status = if creds.is_none() {
-            Status::Error("no drive-credentials.json".into())
-        } else if tokens.is_some() {
-            Status::Connected("saved session".into())
-        } else {
-            Status::Disconnected
+        let status = match (&creds, &tokens) {
+            (None, _) => Status::Error("no drive-credentials.json".into()),
+            (Some(_), Some(t)) if !t.email.is_empty() => Status::Connected(t.email.clone()),
+            (Some(_), Some(_)) => Status::Connected("Google Drive".into()),
+            (Some(_), None) => Status::Disconnected,
         };
-        Self { status, creds, tokens, rx: None, files: Vec::new(), browsing: false }
+        let recents = std::fs::read_to_string(recents_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut s = Self {
+            status,
+            creds,
+            tokens,
+            rx: None,
+            account_rx: None,
+            download_rx: None,
+            downloading: None,
+            just_downloaded: None,
+            files: Vec::new(),
+            recents,
+            browsing: false,
+        };
+        // Confirm the real account name in the background when we have a session.
+        if s.creds.is_some() && s.tokens.is_some() {
+            s.refresh_account();
+        }
+        s
     }
 
     pub fn is_busy(&self) -> bool {
         matches!(self.status, Status::Connecting) || self.rx.is_some()
+    }
+
+    /// Whether a frame should be scheduled to pick up pending background work.
+    pub fn wants_repaint(&self) -> bool {
+        self.rx.is_some() || self.account_rx.is_some() || self.download_rx.is_some()
+    }
+
+    /// Refresh the signed-in account name without disturbing the connection
+    /// status on failure (offline / API disabled just leaves the cached name).
+    fn refresh_account(&mut self) {
+        let (Some(creds), Some(tokens)) = (self.creds.clone(), self.tokens.clone()) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.account_rx = Some(rx);
+        std::thread::spawn(move || {
+            if let Ok((t, email)) = ensure(&creds, &tokens).and_then(|t| account_email(&t.access_token).map(|e| (t, e))) {
+                let _ = tx.send((t, email));
+            }
+        });
     }
 
     /// Start the interactive connect flow on a background thread.
@@ -282,6 +340,67 @@ impl DriveState {
         });
     }
 
+    /// Cancel a pending connect/browse that is stuck (e.g. the browser was
+    /// closed without completing), returning the control to a usable state.
+    pub fn cancel(&mut self) {
+        self.rx = None;
+        self.browsing = false;
+        self.status = match &self.tokens {
+            Some(t) if !t.email.is_empty() => Status::Connected(t.email.clone()),
+            Some(_) => Status::Connected("Google Drive".into()),
+            None => Status::Disconnected,
+        };
+    }
+
+    /// Sign out: forget the saved tokens so the next connect starts fresh.
+    /// The cached account email is dropped too, so the logo greys out.
+    pub fn disconnect(&mut self) {
+        let _ = std::fs::remove_file(tokens_path());
+        self.tokens = None;
+        self.files.clear();
+        self.rx = None;
+        self.account_rx = None;
+        self.browsing = false;
+        self.status = Status::Disconnected;
+    }
+
+    /// Record a document as recently opened (front of the list, capped, saved).
+    pub fn note_opened(&mut self, file: &DriveFile) {
+        self.recents.retain(|f| f.id != file.id);
+        self.recents.insert(0, file.clone());
+        self.recents.truncate(8);
+        if let Some(p) = recents_path().parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        if let Ok(s) = serde_json::to_string_pretty(&self.recents) {
+            let _ = std::fs::write(recents_path(), s);
+        }
+    }
+
+    /// Begin downloading a document on a background thread (shows the loading
+    /// overlay). When done, [`poll`] sets `just_downloaded` for the UI to open.
+    pub fn start_download(&mut self, file: DriveFile) {
+        let (Some(creds), Some(tokens)) = (self.creds.clone(), self.tokens.clone()) else {
+            self.status = Status::Error("connect first".into());
+            return;
+        };
+        self.downloading = Some(file.name.clone());
+        self.browsing = false;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.download_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = ensure(&creds, &tokens).and_then(|t| {
+                let dest = cache_dir().join(format!("{}.pdf", file.id));
+                if dest.exists() {
+                    Ok(dest)
+                } else {
+                    download(&t.access_token, &file.id, &dest).map(|_| dest)
+                }
+            });
+            let _ = tx.send(res.map(|p| (file, p)));
+        });
+    }
+
     /// Download a chosen file to the cache and return its local path.
     pub fn fetch_to_cache(&self, file: &DriveFile) -> Result<PathBuf, String> {
         let (creds, tokens) = (
@@ -298,16 +417,44 @@ impl DriveState {
 
     /// Poll for completed background work; call once per frame.
     pub fn poll(&mut self) {
-        let Some(rx) = &self.rx else { return };
-        if let Ok(job) = rx.try_recv() {
-            self.rx = None;
-            match job {
-                Job::Connected(t, email) => {
+        if let Some(rx) = &self.rx {
+            if let Ok(job) = rx.try_recv() {
+                self.rx = None;
+                match job {
+                    Job::Connected(mut t, email) => {
+                        t.email = email.clone();
+                        t.save();
+                        self.tokens = Some(t);
+                        self.status = Status::Connected(email);
+                    }
+                    Job::Listed(files) => self.files = files,
+                    Job::Failed(e) => self.status = Status::Error(e),
+                }
+            }
+        }
+        // Finished document download → hand it to the UI to open.
+        if let Some(rx) = &self.download_rx {
+            if let Ok(res) = rx.try_recv() {
+                self.download_rx = None;
+                self.downloading = None;
+                match res {
+                    Ok(done) => self.just_downloaded = Some(done),
+                    Err(e) => self.status = Status::Error(e),
+                }
+            }
+        }
+        // Silent account-name refresh: update the display, never error out.
+        if let Some(rx) = &self.account_rx {
+            match rx.try_recv() {
+                Ok((mut t, email)) => {
+                    self.account_rx = None;
+                    t.email = email.clone();
+                    t.save();
                     self.tokens = Some(t);
                     self.status = Status::Connected(email);
                 }
-                Job::Listed(files) => self.files = files,
-                Job::Failed(e) => self.status = Status::Error(e),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.account_rx = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
     }
@@ -347,8 +494,24 @@ fn open_browser(url: &str) {
 }
 
 /// Block until the browser hits the loopback redirect, then return the `code`.
+/// Times out so a consent that is abandoned (blocked app, closed tab) never
+/// leaves the connect flow — and the UI control — stuck forever.
 fn wait_for_code(listener: &TcpListener) -> Result<String, String> {
-    let (mut stream, _) = listener.accept().map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).ok();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let mut stream = loop {
+        match listener.accept() {
+            Ok((s, _)) => break s,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() > deadline {
+                    return Err("timed out waiting for Google authorization".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    stream.set_nonblocking(false).ok();
     let mut buf = [0u8; 8192];
     let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
     let req = String::from_utf8_lossy(&buf[..n]);

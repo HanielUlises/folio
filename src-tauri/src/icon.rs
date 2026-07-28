@@ -22,6 +22,7 @@ pub enum Icon {
     Hand,     // pan / drag tool
     Cursor,   // text-selection I-beam
     Marker,   // highlighter
+    Account,  // signed-in user
 }
 
 /// Draw `icon` centred in `rect`, tinted `color`. The icon is inscribed in the
@@ -155,7 +156,44 @@ pub fn draw(p: &Painter, icon: Icon, rect: Rect, color: Color32) {
             p.line_segment([pt(0.2, 0.5), pt(0.8, 0.5)], Stroke::new(w * 2.6, color)); // highlighted
             line(pt(0.2, 0.70), pt(0.66, 0.70));
         }
+        Icon::Account => {
+            // A person: head circle above a shoulders arc.
+            p.circle_stroke(pt(0.5, 0.34), sq.width() * 0.155, s);
+            let n = 18;
+            let arc: Vec<Pos2> = (0..=n)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / n as f32); // 180°..360°
+                    pt(0.5 + 0.30 * a.cos(), 0.94 + 0.30 * a.sin())
+                })
+                .collect();
+            p.add(Shape::line(arc, s));
+        }
     }
+}
+
+/// The Google Drive triangular mark, filled. `colored` draws it in Drive's
+/// blue/green/yellow; otherwise it is rendered in greys to signal a
+/// disconnected state.
+pub fn draw_drive(p: &Painter, rect: Rect, colored: bool) {
+    let side = rect.width().min(rect.height());
+    let sq = Rect::from_center_size(rect.center(), Vec2::splat(side));
+    let pt = |nx: f32, ny: f32| Pos2::new(sq.left() + nx * sq.width(), sq.top() + ny * sq.height());
+    let (t, l, r, c) = (pt(0.5, 0.13), pt(0.08, 0.87), pt(0.92, 0.87), pt(0.5, 0.62));
+    let (blue, green, yellow) = if colored {
+        (
+            Color32::from_rgb(0x26, 0x84, 0xfc),
+            Color32::from_rgb(0x00, 0xac, 0x47),
+            Color32::from_rgb(0xff, 0xba, 0x00),
+        )
+    } else {
+        (Color32::from_gray(0x66), Color32::from_gray(0x86), Color32::from_gray(0x9c))
+    };
+    let tri = |a: Pos2, b: Pos2, d: Pos2, col: Color32| {
+        p.add(Shape::convex_polygon(vec![a, b, d], col, Stroke::NONE));
+    };
+    tri(l, r, c, blue); // bottom
+    tri(l, t, c, yellow); // left
+    tri(r, t, c, green); // right
 }
 
 /// Allocate a clickable, icon-only button of `size` px. Returns the response.

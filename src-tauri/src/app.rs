@@ -5,7 +5,7 @@ use crate::icon::{self, Icon};
 use crate::model::*;
 use crate::pdf::{CharBox, OutlineItem};
 use eframe::egui::{self, Color32, ColorImage, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── Palette ─────────────────────────────────────────────────────────────────
 // All surface colours live in a `Pal` so the whole UI can be re-themed at once.
@@ -193,6 +193,7 @@ struct Reader {
     scroll_to_page: Option<u32>, // pending jump target (1-based)
     jump_input: String,          // page-number box contents
     tool: ReaderTool,            // active pointer modality
+    collapsed: HashSet<usize>,   // contents: collapsed chapter indices
 }
 
 pub struct Folio {
@@ -221,6 +222,8 @@ pub struct Folio {
     lib_layout: LibLayout,
     show_topics: bool, // sidebar: topics section expanded
     show_tags: bool,   // sidebar: tags section expanded
+    drag_topic: Option<usize>, // sidebar: index of the topic being dragged to reorder
+    confirm_delete_topic: Option<String>, // topic id awaiting delete confirmation
     #[cfg(feature = "drive")]
     drive: crate::drive::DriveState,
 }
@@ -260,6 +263,8 @@ impl Folio {
             lib_layout: LibLayout::Grouped,
             show_topics: true,
             show_tags: true,
+            drag_topic: None,
+            confirm_delete_topic: None,
             #[cfg(feature = "drive")]
             drive: crate::drive::DriveState::new(),
         }
@@ -295,63 +300,139 @@ impl Folio {
             return;
         }
         let mut open_file: Option<DriveFile> = None;
-        let (mut refresh, mut close) = (false, false);
-        egui::Window::new("Google Drive")
+        let mut save_file: Option<DriveFile> = None;
+        let (mut refresh, mut close, mut disconnect, mut switch) = (false, false, false, false);
+        egui::Window::new("drive-picker")
+            .title_bar(false)
             .collapsible(false)
             .resizable(true)
-            .default_size([480.0, 440.0])
+            .default_size([520.0, 460.0])
+            .min_width(380.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0_f32, pal.border)).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(16)))
             .show(ctx, |ui| {
-                match &self.drive.status {
-                    Status::Connected(email) => {
-                        ui.label(egui::RichText::new(format!("Signed in as {email}")).color(pal.txt_dim).size(11.0));
-                    }
-                    Status::Error(e) => {
-                        ui.colored_label(Color32::from_rgb(0xd9, 0x65, 0x65), e.clone());
-                    }
-                    _ => {}
-                }
-                ui.separator();
-                if self.drive.is_busy() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(egui::RichText::new("Loading…").color(pal.txt_dim));
+                // ── Header: logo + title + account ────────────────────────────
+                ui.horizontal(|ui| {
+                    let (lr, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                    icon::draw_drive(ui.painter(), lr, true);
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Google Drive").color(pal.txt).size(15.0).strong());
+                        let sub = match &self.drive.status {
+                            Status::Connected(email) => format!("Signed in as {email}"),
+                            _ => "Select a PDF to open".to_string(),
+                        };
+                        ui.label(egui::RichText::new(sub).color(pal.txt_dim).size(11.0));
                     });
-                } else if self.drive.files.is_empty() {
-                    ui.label(egui::RichText::new("No PDFs found in this Drive.").color(pal.txt_dim).size(12.0));
-                }
-                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(320.0).show(ui, |ui| {
-                    for f in &self.drive.files {
-                        ui.horizontal(|ui| {
-                            if ui.button("Open").clicked() {
-                                open_file = Some(f.clone());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let acct = icon::button(ui, Icon::Account, 24.0, pal.txt_dim, pal.card_hov).on_hover_text("Account");
+                        let popup_id = ui.make_persistent_id("drive-account-menu");
+                        if acct.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(popup_id));
+                        }
+                        egui::popup_below_widget(ui, popup_id, &acct, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                            ui.set_min_width(160.0);
+                            if ui.button("Switch account…").clicked() {
+                                switch = true;
                             }
-                            ui.label(egui::RichText::new(&f.name).size(12.0));
+                            if ui.button("Disconnect").clicked() {
+                                disconnect = true;
+                            }
                         });
-                    }
+                    });
                 });
+                if let Status::Error(e) = &self.drive.status {
+                    ui.add_space(4.0);
+                    ui.colored_label(Color32::from_rgb(0xd9, 0x65, 0x65), egui::RichText::new(e.clone()).size(11.0));
+                }
+                ui.add_space(8.0);
                 ui.separator();
+                ui.add_space(6.0);
+
+                // ── Body: recents + full document list ────────────────────────
+                let mut act = |a: RowAct, f: &crate::drive::DriveFile| match a {
+                    RowAct::Open => open_file = Some(f.clone()),
+                    RowAct::Save => save_file = Some(f.clone()),
+                    RowAct::None => {}
+                };
+                if self.drive.is_busy() {
+                    ui.add_space(20.0);
+                    ui.vertical_centered(|ui| {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Loading your PDFs…").color(pal.txt_dim).size(12.0));
+                    });
+                } else {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(340.0).show(ui, |ui| {
+                        // Quick access: recently opened documents.
+                        if !self.drive.recents.is_empty() {
+                            ui.label(egui::RichText::new("RECENT").color(pal.txt_dim).size(10.0).strong());
+                            ui.add_space(2.0);
+                            for f in &self.drive.recents {
+                                act(drive_row(ui, pal, f), f);
+                            }
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+                        }
+                        if self.drive.files.is_empty() {
+                            ui.add_space(16.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(egui::RichText::new("Browse hasn't loaded — press Refresh.").color(pal.txt_dim).size(12.0));
+                            });
+                        } else {
+                            ui.label(egui::RichText::new(format!("ALL · {} document(s)", self.drive.files.len())).color(pal.txt_dim).size(10.0).strong());
+                            ui.add_space(2.0);
+                            for f in &self.drive.files {
+                                act(drive_row(ui, pal, f), f);
+                            }
+                        }
+                    });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.drive.is_busy(), egui::Button::new("Refresh")).clicked() {
                         refresh = true;
                     }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
                 });
             });
 
-        if refresh {
+        if disconnect {
+            self.drive.disconnect();
+            self.toast(ctx, "Disconnected from Google Drive");
+        } else if switch {
+            // Forget the current account and re-run consent (with the account
+            // chooser); the picker closes and reopens via the top-bar logo.
+            self.drive.disconnect();
+            self.drive.connect();
+        } else if refresh {
             self.drive.browse();
         }
         if let Some(f) = open_file {
-            self.toast(ctx, "Downloading from Drive…");
-            match self.drive.fetch_to_cache(&f) {
-                Ok(path) => {
-                    self.drive.browsing = false;
-                    self.open_reader_path(f.id.clone(), path.to_string_lossy().into_owned(), f.name.clone());
+            // Download in the background so the loading animation can spin.
+            self.drive.start_download(f);
+        }
+        if let Some(f) = save_file {
+            // Save a Drive PDF to a location the user chooses on this device.
+            if let Some(dest) = rfd::FileDialog::new().set_file_name(&f.name).add_filter("PDF", &["pdf"]).save_file() {
+                self.toast(ctx, "Saving…");
+                match self.drive.fetch_to_cache(&f) {
+                    Ok(cache) => match std::fs::copy(&cache, &dest) {
+                        Ok(_) => {
+                            self.drive.note_opened(&f);
+                            self.toast(ctx, "Saved to device");
+                        }
+                        Err(e) => self.drive.status = Status::Error(e.to_string()),
+                    },
+                    Err(e) => self.drive.status = Status::Error(e),
                 }
-                Err(e) => self.drive.status = Status::Error(e),
             }
         }
         if close {
@@ -461,6 +542,7 @@ impl Folio {
             scroll_to_page: None,
             jump_input: String::new(),
             tool: ReaderTool::Pan,
+            collapsed: HashSet::new(),
         });
         self.view = View::Reader;
     }
@@ -543,7 +625,38 @@ impl eframe::App for Folio {
         #[cfg(feature = "drive")]
         {
             self.drive.poll();
+            // Keep repainting while a background Drive job is in flight so its
+            // result (connect / list / account name / download) lands smoothly.
+            if self.drive.wants_repaint() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(80));
+            }
+            // A finished Drive download opens in the reader.
+            if let Some((f, path)) = self.drive.just_downloaded.take() {
+                self.drive.note_opened(&f);
+                self.open_reader_path(f.id.clone(), path.to_string_lossy().into_owned(), f.name.clone());
+            }
             self.ui_drive(ctx);
+            // Loading animation while a document downloads.
+            if let Some(name) = self.drive.downloading.clone() {
+                egui::Area::new(egui::Id::new("drive-loading"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(pal.panel)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .corner_radius(CornerRadius::same(12))
+                            .inner_margin(egui::Margin::symmetric(24, 20))
+                            .show(ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.spinner();
+                                    ui.add_space(8.0);
+                                    ui.label(egui::RichText::new("Loading from Drive").color(pal.txt).size(13.0).strong());
+                                    ui.label(egui::RichText::new(elide(&name, 40)).color(pal.txt_dim).size(11.0));
+                                });
+                            });
+                    });
+            }
         }
 
         // Drag & drop: import any PDF files dropped onto the window.
@@ -603,7 +716,40 @@ impl eframe::App for Folio {
                             }
                         });
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("v0.8.5 · native").color(pal.txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("v0.8.6 · native").color(pal.txt_dim).size(11.0));
+
+                        // ── Google Drive sync control ─────────────────────────
+                        #[cfg(feature = "drive")]
+                        {
+                            use crate::drive::Status;
+                            ui.add_space(12.0);
+                            let connected = matches!(self.drive.status, Status::Connected(_));
+                            let busy = self.drive.is_busy();
+                            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(rect, CornerRadius::same(6), pal.card_hov);
+                            }
+                            // Full colour when synced, grey otherwise.
+                            icon::draw_drive(ui.painter(), rect.shrink(5.0), connected && !busy);
+                            let tip = match &self.drive.status {
+                                Status::Connected(who) => format!("Google Drive · {who}\nClick to browse documents"),
+                                Status::Connecting => "Connecting to Google Drive…\nClick to cancel".to_string(),
+                                Status::Error(e) => format!("Google Drive not connected\n{e}\nClick to connect"),
+                                Status::Disconnected => "Connect Google Drive".to_string(),
+                            };
+                            let resp = resp.on_hover_text(tip);
+                            // Always accept a click: a stuck attempt (no redirect
+                            // ever arrived) must never lock the control forever.
+                            if resp.clicked() {
+                                if matches!(self.drive.status, Status::Connecting) {
+                                    self.drive.cancel();
+                                } else if connected {
+                                    self.drive.browse();
+                                } else {
+                                    self.drive.connect();
+                                }
+                            }
+                        }
                     });
                 });
             });
@@ -758,10 +904,10 @@ impl Folio {
         egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 0)).show(ui, |ui| {
             // filter rows
             let all_n = self.data.pdfs.len();
-            self.sidebar_row(ui, "All PDFs", Icon::Library, pal.txt_dim, all_n, matches!(self.filter, Filter::All), Filter::All);
+            self.sidebar_row(ui, "All PDFs", Icon::Library, pal.txt_dim, all_n, matches!(self.filter, Filter::All), Filter::All, false);
             let uns = self.data.pdfs.iter().filter(|p| p.topic_ids.is_empty()).count();
             if uns > 0 {
-                self.sidebar_row(ui, "Unsorted", Icon::Inbox, pal.txt_dim, uns, matches!(self.filter, Filter::Unsorted), Filter::Unsorted);
+                self.sidebar_row(ui, "Unsorted", Icon::Inbox, pal.txt_dim, uns, matches!(self.filter, Filter::Unsorted), Filter::Unsorted, false);
             }
 
             ui.add_space(10.0);
@@ -774,21 +920,61 @@ impl Folio {
             }
             if self.show_topics {
                 let topics = self.data.topics.clone();
-                for t in &topics {
+                let pointer = ui.input(|i| i.pointer.hover_pos());
+                let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+                for (i, t) in topics.iter().enumerate() {
                     let n = self.data.pdfs.iter().filter(|p| p.in_topic(&t.id)).count();
                     let active = matches!(&self.filter, Filter::Topic(id) if id == &t.id);
-                    let resp = self.sidebar_row(ui, &t.name, Icon::Folder, parse_hex(&t.color), n, active, Filter::Topic(t.id.clone()));
+                    let resp = self.sidebar_row(ui, &t.name, Icon::Folder, parse_hex(&t.color), n, active, Filter::Topic(t.id.clone()), true);
+                    row_rects.push((i, resp.rect));
+                    if self.drag_topic == Some(i) {
+                        // The row being dragged: lifted outline + grab cursor.
+                        ui.painter().rect_stroke(resp.rect, CornerRadius::same(6), Stroke::new(1.5_f32, pal.accent), egui::StrokeKind::Middle);
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    }
+                    if resp.drag_started() {
+                        self.drag_topic = Some(i);
+                    }
+                    // Right-click: recolour or delete the topic.
                     resp.context_menu(|ui| {
+                        ui.label(egui::RichText::new("Colour").color(pal.txt_dim).size(10.0).strong());
+                        ui.horizontal(|ui| {
+                            for c in PALETTE {
+                                let (r, cr) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                                ui.painter().circle_filled(r.center(), 7.0, parse_hex(c));
+                                if &t.color == c {
+                                    ui.painter().circle_stroke(r.center(), 8.0, Stroke::new(2.0_f32, pal.txt));
+                                }
+                                if cr.clicked() {
+                                    if let Some(topic) = self.data.topics.iter_mut().find(|x| x.id == t.id) {
+                                        topic.color = c.to_string();
+                                    }
+                                    self.save();
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.separator();
                         if ui.button("Delete topic").clicked() {
-                            self.data.pdfs.iter_mut().for_each(|p| {
-                                p.topic_ids.retain(|x| x != &t.id);
-                            });
-                            self.data.topics.retain(|x| x.id != t.id);
-                            if matches!(&self.filter, Filter::Topic(id) if id == &t.id) { self.filter = Filter::All; }
-                            self.save();
+                            self.confirm_delete_topic = Some(t.id.clone());
                             ui.close_menu();
                         }
                     });
+                }
+                // Live reorder: while dragging, moving over another row shifts it.
+                if let (Some(from), Some(p)) = (self.drag_topic, pointer) {
+                    if let Some(&(to, _)) = row_rects.iter().find(|(_, r)| r.contains(p)) {
+                        if to != from {
+                            let item = self.data.topics.remove(from);
+                            self.data.topics.insert(to, item);
+                            self.drag_topic = Some(to);
+                        }
+                    }
+                }
+                // Drop: persist the new order.
+                if self.drag_topic.is_some() && ui.input(|i| i.pointer.any_released()) {
+                    self.drag_topic = None;
+                    self.save();
                 }
                 if topics.is_empty() {
                     ui.label(egui::RichText::new("No topics yet").color(pal.txt_dim).size(11.0));
@@ -853,23 +1039,15 @@ impl Folio {
                             }
                         }
                     }
-                    #[cfg(feature = "drive")]
-                    {
-                        use crate::drive::Status;
-                        let connected = matches!(self.drive.status, Status::Connected(_));
-                        let label = if connected { "Drive ✓" } else { "Drive" };
-                        if ui.add_enabled(!self.drive.is_busy(), egui::Button::new(label)).clicked() {
-                            if connected { self.drive.browse(); } else { self.drive.connect(); }
-                        }
-                    }
                 });
                 ui.label(egui::RichText::new(format!("{} PDFs · {} topics · {} tags", self.data.pdfs.len(), self.data.topics.len(), self.data.tags.len())).color(pal.txt_dim).size(11.0));
             });
     }
 
-    fn sidebar_row(&mut self, ui: &mut egui::Ui, label: &str, icon: Icon, tint: Color32, count: usize, active: bool, target: Filter) -> egui::Response {
+    fn sidebar_row(&mut self, ui: &mut egui::Ui, label: &str, icon: Icon, tint: Color32, count: usize, active: bool, target: Filter, draggable: bool) -> egui::Response {
         let pal = self.pal;
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
+        let sense = if draggable { Sense::click_and_drag() } else { Sense::click() };
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), sense);
         let p = ui.painter();
         if active {
             p.rect_filled(rect, CornerRadius::same(6), pal.card_hov);
@@ -1112,6 +1290,44 @@ impl Folio {
     // ── Modals ──────────────────────────────────────────────────────────────
     fn ui_modals(&mut self, ctx: &egui::Context) {
         let pal = self.pal;
+
+        // Confirm before deleting a topic.
+        if let Some(id) = self.confirm_delete_topic.clone() {
+            let name = self.data.topic(&id).map(|t| t.name.clone()).unwrap_or_default();
+            let mut open = true;
+            let (mut confirm, mut cancel) = (false, false);
+            egui::Window::new("Delete topic")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new(format!("Delete the topic “{name}”?")).color(pal.txt).size(13.0));
+                    ui.label(egui::RichText::new("The PDFs stay in your library; only the topic is removed.").color(pal.txt_dim).size(11.0));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xc0, 0x4a, 0x4a))).clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if confirm {
+                self.data.pdfs.iter_mut().for_each(|p| p.topic_ids.retain(|x| x != &id));
+                self.data.topics.retain(|x| x.id != id);
+                if matches!(&self.filter, Filter::Topic(f) if f == &id) {
+                    self.filter = Filter::All;
+                }
+                self.drag_topic = None;
+                self.save();
+                self.confirm_delete_topic = None;
+            } else if cancel || !open {
+                self.confirm_delete_topic = None;
+            }
+        }
+
         if self.show_new_topic {
             let mut open = true;
             let mut create = false;
@@ -1317,23 +1533,91 @@ impl Folio {
         });
         ui.add_space(4.0);
 
+        // Which entry are we currently reading? The deepest item whose page is
+        // at or before the current page.
+        let cur_page = r.current_page;
+        let active = r
+            .outline
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.page.map(|p| p + 1 <= cur_page).unwrap_or(false))
+            .map(|(i, _)| i)
+            .last();
+
         let mut jump: Option<u32> = None;
+        let mut toggle: Option<usize> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for it in &r.outline {
-                ui.horizontal(|ui| {
-                    ui.add_space(it.level as f32 * 12.0);
-                    let color = if it.page.is_some() { pal.txt } else { pal.txt_dim };
-                    let label = egui::Label::new(egui::RichText::new(&it.title).size(12.0).color(color))
-                        .truncate()
-                        .sense(Sense::click());
-                    if ui.add(label).clicked() {
-                        if let Some(p) = it.page {
-                            jump = Some(p + 1); // outline pages are 0-based
-                        }
+            let avail = ui.available_width();
+            // While collapsed, hide every deeper item until the level returns.
+            let mut hide_below: Option<u32> = None;
+            for (idx, it) in r.outline.iter().enumerate() {
+                if let Some(l) = hide_below {
+                    if it.level > l {
+                        continue;
                     }
-                });
+                    hide_below = None;
+                }
+                // A subtle, pale separator before each top-level chapter.
+                if it.level == 0 && idx != 0 {
+                    ui.add_space(3.0);
+                    let (sr, _) = ui.allocate_exact_size(Vec2::new(avail, 1.0), Sense::hover());
+                    ui.painter().hline(sr.x_range(), sr.center().y, Stroke::new(1.0_f32, pal.border.gamma_multiply(0.45)));
+                    ui.add_space(3.0);
+                }
+                let has_children = r.outline.get(idx + 1).map(|n| n.level > it.level).unwrap_or(false);
+                let collapsed = r.collapsed.contains(&idx);
+                let is_active = active == Some(idx);
+                let clickable = it.page.is_some();
+                let sense = if clickable || has_children { Sense::click() } else { Sense::hover() };
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(avail, 22.0), sense);
+                let hovered = resp.hovered();
+                if is_active {
+                    // Highlight the section we're currently reading.
+                    ui.painter().rect_filled(rect, CornerRadius::same(5), pal.accent.gamma_multiply(0.16));
+                    ui.painter().rect_filled(Rect::from_min_size(rect.left_top(), Vec2::new(2.5, rect.height())), CornerRadius::same(1), pal.accent);
+                } else if hovered && (clickable || has_children) {
+                    ui.painter().rect_filled(rect, CornerRadius::same(5), pal.card_hov.gamma_multiply(0.7));
+                }
+                if clickable || has_children {
+                    ui.ctx().set_cursor_icon(if hovered { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default });
+                }
+                let base = if is_active { pal.accent } else if clickable { pal.txt } else { pal.txt_dim };
+                let color = if is_active || hovered { base } else { base.gamma_multiply(0.82) };
+                let indent = 8.0 + it.level as f32 * 12.0;
+                // Collapse triangle for entries that have sub-entries.
+                let mut text_x = rect.left() + indent;
+                let chev_rect = Rect::from_center_size(Pos2::new(rect.left() + indent + 6.0, rect.center().y), Vec2::splat(14.0));
+                if has_children {
+                    let chev = if collapsed { Icon::ChevronRight } else { Icon::Chevron };
+                    icon::draw(&ui.painter().with_clip_rect(rect), chev, chev_rect, color.gamma_multiply(0.9));
+                    text_x = chev_rect.right() + 3.0;
+                }
+                ui.painter().with_clip_rect(rect).text(
+                    Pos2::new(text_x, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &it.title,
+                    egui::FontId::proportional(12.0),
+                    color,
+                );
+                if resp.clicked() {
+                    let on_chev = has_children
+                        && resp.interact_pointer_pos().map(|p| chev_rect.expand(4.0).contains(p)).unwrap_or(false);
+                    if on_chev {
+                        toggle = Some(idx);
+                    } else if let Some(p) = it.page {
+                        jump = Some(p + 1); // outline pages are 0-based
+                    }
+                }
+                if collapsed {
+                    hide_below = Some(it.level);
+                }
             }
         });
+        if let Some(idx) = toggle {
+            if !r.collapsed.remove(&idx) {
+                r.collapsed.insert(idx);
+            }
+        }
         if let Some(p) = jump {
             r.scroll_to_page = Some(p.clamp(1, r.page_count.max(1)));
         }
@@ -1986,6 +2270,57 @@ fn fmt_size(b: u64) -> String {
     } else {
         format!("{:.1} MB", b as f64 / 1_048_576.0)
     }
+}
+
+/// What a click on a Drive document row means.
+#[cfg(feature = "drive")]
+enum RowAct {
+    None,
+    Open,
+    Save,
+}
+
+/// One document row in the Drive picker: a hoverable, clickable card with a PDF
+/// glyph, name and size. Left-click opens; right-click offers open / save.
+#[cfg(feature = "drive")]
+fn drive_row(ui: &mut egui::Ui, pal: Pal, f: &crate::drive::DriveFile) -> RowAct {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(8), pal.card_hov);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let g = Rect::from_min_size(Pos2::new(rect.left() + 10.0, rect.center().y - 9.0), Vec2::new(14.0, 18.0));
+    ui.painter().rect_filled(g, CornerRadius::same(2), pal.card);
+    ui.painter().rect_stroke(g, CornerRadius::same(2), Stroke::new(1.0_f32, pal.border), egui::StrokeKind::Middle);
+    ui.painter().text(g.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(9.0), pal.accent);
+    ui.painter().text(
+        Pos2::new(g.right() + 12.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        elide(&f.name, 50),
+        egui::FontId::proportional(13.0),
+        pal.txt,
+    );
+    if f.size > 0 {
+        ui.painter().text(
+            Pos2::new(rect.right() - 10.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            fmt_size(f.size),
+            egui::FontId::proportional(11.0),
+            pal.txt_dim,
+        );
+    }
+    let mut act = if resp.clicked() { RowAct::Open } else { RowAct::None };
+    resp.context_menu(|ui| {
+        if ui.button("Open").clicked() {
+            act = RowAct::Open;
+            ui.close_menu();
+        }
+        if ui.button("Save to device…").clicked() {
+            act = RowAct::Save;
+            ui.close_menu();
+        }
+    });
+    act
 }
 
 fn elide(s: &str, max: usize) -> String {
