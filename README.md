@@ -33,7 +33,7 @@ The reader offers a table-of-contents panel, page navigation, zoom and five high
 
 ### Themes
 
-Folio ships three themes — dark, light and sepia:
+Folio ships three themes: dark, light and sepia:
 
 | Dark | Light | Sepia |
 |:----:|:-----:|:-----:|
@@ -51,10 +51,10 @@ The pdfium library is embedded in the executable and extracted to a per-user cac
 ### Application menu integration
 
 Folio registers itself the first time it runs, so it shows up in your
-application menu / search by name — no separate installer:
+application menu / search by name with no separate installer:
 
 - **Linux:** a per-user `.desktop` entry and icon are written under
-  `~/.local/share` (works on any freedesktop desktop — GNOME, KDE, …).
+  `~/.local/share` (works on any freedesktop desktop GNOME, KDE, …).
 - **Windows:** a Start Menu shortcut is created so Folio appears in search.
 
 For a manual or scripted install from source on Linux, `scripts/install-desktop.sh`
