@@ -63,6 +63,4 @@ does the same thing explicitly (resolving paths relative to the repository).
 ## Google Drive (experimental)
 
 Folio can connect to Google Drive to browse and open your PDFs directly. This
-integration is **experimental and currently invitation-only** — while it is in
-testing, only accounts approved by the developer can sign in. It has no effect on
-the offline experience and is absent from standard builds.
+integration is **experimental and currently invitation-only**
