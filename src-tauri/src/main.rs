@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(feature = "drive")]
+mod drive;
 mod engine;
 mod icon;
 mod model;

@@ -221,6 +221,8 @@ pub struct Folio {
     lib_layout: LibLayout,
     show_topics: bool, // sidebar: topics section expanded
     show_tags: bool,   // sidebar: tags section expanded
+    #[cfg(feature = "drive")]
+    drive: crate::drive::DriveState,
 }
 
 impl Folio {
@@ -258,6 +260,8 @@ impl Folio {
             lib_layout: LibLayout::Grouped,
             show_topics: true,
             show_tags: true,
+            #[cfg(feature = "drive")]
+            drive: crate::drive::DriveState::new(),
         }
     }
 
@@ -278,6 +282,81 @@ impl Folio {
 
     fn toast(&mut self, ctx: &egui::Context, msg: &str) {
         self.toast = Some((msg.to_string(), ctx.input(|i| i.time) + 2.2));
+    }
+
+    /// Google Drive browser window (feature = "drive"). Lists the account's
+    /// PDFs; opening one downloads it to the cache and hands the local path to
+    /// the reader, keyed by the Drive file id so highlights persist.
+    #[cfg(feature = "drive")]
+    fn ui_drive(&mut self, ctx: &egui::Context) {
+        use crate::drive::{DriveFile, Status};
+        let pal = self.pal;
+        if !self.drive.browsing {
+            return;
+        }
+        let mut open_file: Option<DriveFile> = None;
+        let (mut refresh, mut close) = (false, false);
+        egui::Window::new("Google Drive")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([480.0, 440.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                match &self.drive.status {
+                    Status::Connected(email) => {
+                        ui.label(egui::RichText::new(format!("Signed in as {email}")).color(pal.txt_dim).size(11.0));
+                    }
+                    Status::Error(e) => {
+                        ui.colored_label(Color32::from_rgb(0xd9, 0x65, 0x65), e.clone());
+                    }
+                    _ => {}
+                }
+                ui.separator();
+                if self.drive.is_busy() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Loading…").color(pal.txt_dim));
+                    });
+                } else if self.drive.files.is_empty() {
+                    ui.label(egui::RichText::new("No PDFs found in this Drive.").color(pal.txt_dim).size(12.0));
+                }
+                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(320.0).show(ui, |ui| {
+                    for f in &self.drive.files {
+                        ui.horizontal(|ui| {
+                            if ui.button("Open").clicked() {
+                                open_file = Some(f.clone());
+                            }
+                            ui.label(egui::RichText::new(&f.name).size(12.0));
+                        });
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!self.drive.is_busy(), egui::Button::new("Refresh")).clicked() {
+                        refresh = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if refresh {
+            self.drive.browse();
+        }
+        if let Some(f) = open_file {
+            self.toast(ctx, "Downloading from Drive…");
+            match self.drive.fetch_to_cache(&f) {
+                Ok(path) => {
+                    self.drive.browsing = false;
+                    self.open_reader_path(f.id.clone(), path.to_string_lossy().into_owned(), f.name.clone());
+                }
+                Err(e) => self.drive.status = Status::Error(e),
+            }
+        }
+        if close {
+            self.drive.browsing = false;
+        }
     }
 
     fn filtered_pdfs(&self) -> Vec<PdfEntry> {
@@ -355,13 +434,19 @@ impl Folio {
             self.engine_err = Some(format!("File not found: {}", pdf.path));
             return;
         }
+        self.open_reader_path(pdf.id.clone(), pdf.path.clone(), pdf.name.clone());
+    }
+
+    /// Open the reader on an explicit local path. `id` keys the document's
+    /// highlights, so a stable id (e.g. a Drive file id) keeps them across runs.
+    fn open_reader_path(&mut self, id: String, path: String, name: String) {
         // Ask the worker to (re)open the document; pages/chars stream in later.
         self.worker.send(Req::Close);
-        self.worker.send(Req::Open(pdf.path.clone()));
+        self.worker.send(Req::Open(path.clone()));
         self.reader = Some(Reader {
-            pdf_id: pdf.id.clone(),
-            path: pdf.path.clone(),
-            name: pdf.name.clone(),
+            pdf_id: id,
+            path,
+            name,
             page_count: 0,
             default_size: (595.0, 842.0),
             zoom: 1.4,
@@ -455,6 +540,12 @@ impl eframe::App for Folio {
             self.handle_res(ctx, res);
         }
 
+        #[cfg(feature = "drive")]
+        {
+            self.drive.poll();
+            self.ui_drive(ctx);
+        }
+
         // Drag & drop: import any PDF files dropped onto the window.
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
             i.raw
@@ -512,7 +603,7 @@ impl eframe::App for Folio {
                             }
                         });
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("v0.8 · native").color(pal.txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("v0.8.5 · native").color(pal.txt_dim).size(11.0));
                     });
                 });
             });
@@ -760,6 +851,15 @@ impl Folio {
                                     self.save();
                                 }
                             }
+                        }
+                    }
+                    #[cfg(feature = "drive")]
+                    {
+                        use crate::drive::Status;
+                        let connected = matches!(self.drive.status, Status::Connected(_));
+                        let label = if connected { "Drive ✓" } else { "Drive" };
+                        if ui.add_enabled(!self.drive.is_busy(), egui::Button::new(label)).clicked() {
+                            if connected { self.drive.browse(); } else { self.drive.connect(); }
                         }
                     }
                 });

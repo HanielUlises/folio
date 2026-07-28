@@ -1,6 +1,6 @@
 [package]
 name = "folio"
-version = "0.8.0"
+version = "0.8.5"
 edition = "2021"
 description = "Folio — a fast, native PDF reader and organiser (pure Rust, egui)"
 default-run = "folio"
@@ -33,6 +33,17 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 dirs        = "5"
 uuid        = { version = "1", features = ["v4"] }
+
+# ── Google Drive integration (optional, `drive` feature) ─────────────────────
+ureq      = { version = "2", optional = true }
+sha2      = { version = "0.10", optional = true }
+base64    = { version = "0.22", optional = true }
+getrandom = { version = "0.2", optional = true }
+
+[features]
+# Networked Google Drive support. Off by default so the standard build stays
+# fully offline with no TLS/HTTP dependencies.
+drive = ["dep:ureq", "dep:sha2", "dep:base64", "dep:getrandom"]
 
 [profile.release]
 opt-level     = 3

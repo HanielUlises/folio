@@ -26,7 +26,7 @@ jobs:
 
       - name: Build
         working-directory: src-tauri
-        run: cargo build --release
+        run: cargo build --release --features drive
 
       - name: Package
         run: |
@@ -66,7 +66,7 @@ jobs:
 
       - name: Build
         working-directory: src-tauri
-        run: cargo build --release
+        run: cargo build --release --features drive
 
       # A single self-contained executable — no DLL shipped alongside it.
       - name: Upload artifact
