@@ -42,3 +42,31 @@ Pre-built binaries are available from the [Releases](https://github.com/HanielUl
 - **Windows** (`folio.exe`): download and run it directly — no installation, no separate files.
 
 The pdfium library is embedded in the executable and extracted to a per-user cache directory on first run, so nothing needs to be kept alongside it.
+
+## Google Drive (optional)
+
+Builds compiled with the `drive` feature can connect to Google Drive to browse
+and open your PDFs. Drive is off in the standard build; nothing about the
+offline experience changes when it is absent.
+
+Because Folio is a native app, connecting requires an OAuth **client** and the
+`drive.readonly` scope. Until the app is published for public use, supply your
+own client:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com): create a
+   project, **enable the Google Drive API**, configure the OAuth consent screen,
+   add yourself under **Test users**, and create an **OAuth client ID** of type
+   **Desktop app**.
+2. Save the client id and secret as `drive-credentials.json` in Folio's data
+   directory:
+   - **Linux:** `~/.local/share/com.folio.pdf/drive-credentials.json`
+   - **Windows:** `%APPDATA%\com.folio.pdf\drive-credentials.json`
+
+   ```json
+   { "client_id": "…apps.googleusercontent.com", "client_secret": "…" }
+   ```
+3. Launch Folio and click the Drive logo in the top bar to sign in. Tokens are
+   cached alongside the credentials; downloaded documents are cached for offline
+   reading.
+
+The file lives outside the repository and is never committed.
