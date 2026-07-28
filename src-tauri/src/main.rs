@@ -5,6 +5,7 @@ mod app;
 mod drive;
 mod engine;
 mod icon;
+mod integrate;
 mod model;
 mod pdf;
 
@@ -20,6 +21,9 @@ fn window_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    // Register in the OS app menu on first run (best-effort, per-user).
+    integrate::ensure_registered();
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([900.0, 600.0])

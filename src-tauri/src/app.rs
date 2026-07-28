@@ -1674,18 +1674,40 @@ impl Folio {
         if (zoom_delta - 1.0).abs() < 1e-3 {
             return None;
         }
+        let hover = hover?;
         let r = self.reader.as_mut()?;
         let old = r.zoom;
         let new = (old * zoom_delta).clamp(0.5, 5.0);
         if (new - old).abs() < 1e-4 {
             return None;
         }
+        // Keep the content point under the cursor fixed. The page column scales
+        // by new/old, but the 12px top pad and 10px inter-page gaps are fixed —
+        // so map the cursor's content-y through the real layout, not a flat
+        // multiply (which drifts badly deep in a long document).
+        let anchor = (hover.y - viewport_top).max(0.0);
+        let target = r.scroll_offset + anchor;
+        let default = r.default_size;
+        let (mut y_old, mut y_new) = (12.0f32, 12.0f32);
+        let mut mapped = None;
+        for slot in &r.pages {
+            let (_, h) = slot.size_pts.unwrap_or(default);
+            let (po, pn) = (h * old, h * new);
+            if target < y_old + po {
+                let frac = if po > 0.0 { (target - y_old).max(0.0) / po } else { 0.0 };
+                mapped = Some(y_new + frac * pn);
+                break;
+            }
+            if target < y_old + po + 10.0 {
+                mapped = Some(y_new + pn + (target - y_old - po)); // inside a fixed gap
+                break;
+            }
+            y_old += po + 10.0;
+            y_new += pn + 10.0;
+        }
         r.zoom = new;
-        // Keep the content point under the cursor fixed: scale the distance from
-        // the viewport top through the zoom factor.
-        let f = new / old;
-        let anchor = (hover?.y - viewport_top).max(0.0);
-        Some(((r.scroll_offset + anchor) * f - anchor).max(0.0))
+        let content_new = mapped.unwrap_or_else(|| target * (new / old));
+        Some((content_new - anchor).max(0.0))
     }
 
     fn ui_pages(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1693,6 +1715,9 @@ impl Folio {
         // Ctrl/⌘ + scroll (or trackpad pinch) zooms, anchored under the cursor —
         // must run before we snapshot `zoom`, and it may force a scroll offset.
         let viewport_top = ui.max_rect().top();
+        // The "current page" is the one crossing this reading line (a little below
+        // the very top), so a thin sliver of the previous page is not counted.
+        let ref_line = viewport_top + ui.max_rect().height() * 0.15;
         let mut forced_offset = self.apply_scroll_zoom(ctx, viewport_top);
 
         let Some(reader) = self.reader.as_ref() else { return };
@@ -1769,7 +1794,8 @@ impl Folio {
                         let sense = if tool == ReaderTool::Pan { Sense::hover() } else { Sense::click_and_drag() };
                         let (rect, resp) = ui.allocate_exact_size(disp, sense);
                         let visible = ui.is_rect_visible(rect);
-                        if visible && !first_visible_set {
+                        // Current page = the first one reaching past the reading line.
+                        if !first_visible_set && rect.bottom() > ref_line {
                             top_visible_page = idx + 1;
                             first_visible_set = true;
                         }

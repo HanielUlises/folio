@@ -1,5 +1,10 @@
 # Folio
 
+[![Latest release](https://img.shields.io/github/v/release/HanielUlises/folio?sort=semver)](https://github.com/HanielUlises/folio/releases)
+[![License: MIT](https://img.shields.io/github/license/HanielUlises/folio)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-informational)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust&logoColor=white)
+
 Folio is a PDF reader and library manager written in Rust. It targets Linux and Windows.
 
 The application is built with egui/eframe for the interface and pdfium-render for PDF handling. Rendering, text extraction, thumbnail generation and search are performed entirely in-process.
@@ -39,34 +44,25 @@ Folio ships three themes — dark, light and sepia:
 Pre-built binaries are available from the [Releases](https://github.com/HanielUlises/folio/releases) page.
 
 - **Linux** (`folio-linux-x86_64.tar.gz`): extract and run the `folio` executable.
-- **Windows** (`folio.exe`): download and run it directly — no installation, no separate files.
+- **Windows** (`folio.exe`): download and run it directly no installation, no separate files.
 
 The pdfium library is embedded in the executable and extracted to a per-user cache directory on first run, so nothing needs to be kept alongside it.
 
-## Google Drive (optional)
+### Application menu integration
 
-Builds compiled with the `drive` feature can connect to Google Drive to browse
-and open your PDFs. Drive is off in the standard build; nothing about the
-offline experience changes when it is absent.
+Folio registers itself the first time it runs, so it shows up in your
+application menu / search by name — no separate installer:
 
-Because Folio is a native app, connecting requires an OAuth **client** and the
-`drive.readonly` scope. Until the app is published for public use, supply your
-own client:
+- **Linux:** a per-user `.desktop` entry and icon are written under
+  `~/.local/share` (works on any freedesktop desktop — GNOME, KDE, …).
+- **Windows:** a Start Menu shortcut is created so Folio appears in search.
 
-1. In the [Google Cloud Console](https://console.cloud.google.com): create a
-   project, **enable the Google Drive API**, configure the OAuth consent screen,
-   add yourself under **Test users**, and create an **OAuth client ID** of type
-   **Desktop app**.
-2. Save the client id and secret as `drive-credentials.json` in Folio's data
-   directory:
-   - **Linux:** `~/.local/share/com.folio.pdf/drive-credentials.json`
-   - **Windows:** `%APPDATA%\com.folio.pdf\drive-credentials.json`
+For a manual or scripted install from source on Linux, `scripts/install-desktop.sh`
+does the same thing explicitly (resolving paths relative to the repository).
 
-   ```json
-   { "client_id": "…apps.googleusercontent.com", "client_secret": "…" }
-   ```
-3. Launch Folio and click the Drive logo in the top bar to sign in. Tokens are
-   cached alongside the credentials; downloaded documents are cached for offline
-   reading.
+## Google Drive (experimental)
 
-The file lives outside the repository and is never committed.
+Folio can connect to Google Drive to browse and open your PDFs directly. This
+integration is **experimental and currently invitation-only** — while it is in
+testing, only accounts approved by the developer can sign in. It has no effect on
+the offline experience and is absent from standard builds.
