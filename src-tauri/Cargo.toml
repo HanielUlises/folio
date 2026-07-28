@@ -40,5 +40,9 @@ codegen-units = 1
 lto           = true
 strip         = true
 
+[build-dependencies]
+# Embeds the application icon into folio.exe on Windows (no-op elsewhere).
+winresource = "0.1"
+
 [profile.dev]
 opt-level = 1          # keep the UI responsive even in debug

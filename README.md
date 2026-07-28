@@ -26,6 +26,14 @@ The reader offers a table-of-contents panel, page navigation, zoom and five high
 
 ![Folio reader view](docs/screenshots/reader.png)
 
+### Themes
+
+Folio ships three themes — dark, light and sepia:
+
+| Dark | Light | Sepia |
+|:----:|:-----:|:-----:|
+| ![Dark theme](docs/screenshots/theme-dark.png) | ![Light theme](docs/screenshots/theme-light.png) | ![Sepia theme](docs/screenshots/theme-sepia.png) |
+
 ## Download
 
 Pre-built binaries are available from the [Releases](https://github.com/HanielUlises/folio/releases) page.

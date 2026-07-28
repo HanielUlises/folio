@@ -1496,6 +1496,46 @@ impl Folio {
                                         }
                                     }
                                 }
+
+                                // Right-click on a live selection to highlight or copy it.
+                                let sel_here = reader
+                                    .selection
+                                    .as_ref()
+                                    .filter(|s| s.page == idx + 1 && s.start != s.end)
+                                    .is_some();
+                                resp.context_menu(|ui| {
+                                    if let Some(sel) = reader.selection.as_ref().filter(|_| sel_here) {
+                                        ui.label(egui::RichText::new("Highlight").color(pal.txt_dim).size(10.0).strong());
+                                        ui.horizontal(|ui| {
+                                            for c in HL_COLORS {
+                                                let (r, cr) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+                                                ui.painter().circle_filled(r.center(), 8.0, parse_hex(c));
+                                                if cr.clicked() {
+                                                    let rects = selection_rects(chars, lines, sel.start, sel.end)
+                                                        .into_iter()
+                                                        .map(|(x0, y0, x1, y1)| HighlightRect {
+                                                            x: x0 / w_pts, y: y0 / h_pts, w: (x1 - x0) / w_pts, h: (y1 - y0) / h_pts,
+                                                        })
+                                                        .collect();
+                                                    save_highlight = Some(PdfHighlight {
+                                                        id: uuid::Uuid::new_v4().to_string(),
+                                                        page: sel.page,
+                                                        rects,
+                                                        color: c.to_string(),
+                                                    });
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                        ui.separator();
+                                        if ui.button("Copy").clicked() {
+                                            ui.ctx().copy_text(selection_text(chars, sel.start, sel.end));
+                                            ui.close_menu();
+                                        }
+                                    } else {
+                                        ui.label(egui::RichText::new("Select text to highlight").color(pal.txt_dim).size(11.0));
+                                    }
+                                });
                             }
                         } else {
                             // free textures of off-screen pages on big books to bound memory

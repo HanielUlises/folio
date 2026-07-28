@@ -36,4 +36,14 @@ fn main() {
             src.display()
         )
     });
+
+    // Embed the application icon into folio.exe so Windows shows the Folio logo
+    // in Explorer, the taskbar and the title bar. No effect on other platforms.
+    if target_os == "windows" {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("icons/icon.ico");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=failed to embed Windows icon: {e}");
+        }
+    }
 }
