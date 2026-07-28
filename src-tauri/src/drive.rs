@@ -30,6 +30,8 @@ fn tokens_path() -> PathBuf { data_dir().join("drive-tokens.json") }
 fn recents_path() -> PathBuf { data_dir().join("drive-recents.json") }
 /// Where downloaded Drive PDFs are cached for offline reading.
 pub fn cache_dir() -> PathBuf { data_dir().join("drive-cache") }
+/// The path where the OAuth client credentials must be placed (for messaging).
+pub fn credentials_hint() -> String { creds_path().display().to_string() }
 
 // ── Credentials & tokens ─────────────────────────────────────────────────────
 
@@ -284,6 +286,11 @@ impl DriveState {
         matches!(self.status, Status::Connecting) || self.rx.is_some()
     }
 
+    /// True when no OAuth client credentials are configured on this machine.
+    pub fn needs_credentials(&self) -> bool {
+        self.creds.is_none()
+    }
+
     /// Whether a frame should be scheduled to pick up pending background work.
     pub fn wants_repaint(&self) -> bool {
         self.rx.is_some() || self.account_rx.is_some() || self.download_rx.is_some()
@@ -485,8 +492,10 @@ fn get_auth(url: &str, token: &str) -> Result<String, String> {
 }
 
 fn open_browser(url: &str) {
+    // On Windows, `explorer.exe <url>` launches the default browser with the URL
+    // intact. `cmd /C start` would split the OAuth URL on its many `&` chars.
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]

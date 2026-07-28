@@ -223,6 +223,7 @@ pub struct Folio {
     show_topics: bool, // sidebar: topics section expanded
     show_tags: bool,   // sidebar: tags section expanded
     drag_topic: Option<usize>, // sidebar: index of the topic being dragged to reorder
+    drag_pdf: Option<String>,  // library: id of the PDF card being dragged to reorder
     confirm_delete_topic: Option<String>, // topic id awaiting delete confirmation
     #[cfg(feature = "drive")]
     drive: crate::drive::DriveState,
@@ -264,6 +265,7 @@ impl Folio {
             show_topics: true,
             show_tags: true,
             drag_topic: None,
+            drag_pdf: None,
             confirm_delete_topic: None,
             #[cfg(feature = "drive")]
             drive: crate::drive::DriveState::new(),
@@ -716,7 +718,7 @@ impl eframe::App for Folio {
                             }
                         });
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("v0.8.6 · native").color(pal.txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("v0.8.7 · native").color(pal.txt_dim).size(11.0));
 
                         // ── Google Drive sync control ─────────────────────────
                         #[cfg(feature = "drive")]
@@ -745,6 +747,9 @@ impl eframe::App for Folio {
                                     self.drive.cancel();
                                 } else if connected {
                                     self.drive.browse();
+                                } else if self.drive.needs_credentials() {
+                                    let hint = crate::drive::credentials_hint();
+                                    self.toast(ctx, &format!("Google Drive not set up — add drive-credentials.json at {hint}"));
                                 } else {
                                     self.drive.connect();
                                 }
@@ -895,6 +900,11 @@ impl Folio {
                         self.ui_grid(ui, ctx, &pdfs, "all");
                     }
                 });
+                // Finished dragging a card → persist the new order.
+                if self.drag_pdf.is_some() && ui.input(|i| i.pointer.any_released()) {
+                    self.drag_pdf = None;
+                    self.save();
+                }
             });
     }
 
@@ -1096,14 +1106,38 @@ impl Folio {
         let avail = ui.available_width();
         let cols = ((avail + spacing) / (card_w + spacing)).floor().max(1.0) as usize;
 
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let mut rects: Vec<(String, Rect)> = Vec::new();
         egui::Grid::new(("pdf-grid", salt)).spacing(Vec2::new(spacing, spacing)).show(ui, |ui| {
             for (i, pdf) in pdfs.iter().enumerate() {
-                self.ui_card(ui, ctx, pdf, card_w, cover_h);
+                let resp = self.ui_card(ui, ctx, pdf, card_w, cover_h);
+                rects.push((pdf.id.clone(), resp.rect));
                 if (i + 1) % cols == 0 {
                     ui.end_row();
                 }
             }
         });
+
+        // Drag-to-reorder within this group: when the dragged card hovers over
+        // another card here, move it to that card's slot in the library order.
+        if let Some(drag_id) = self.drag_pdf.clone() {
+            let in_group = pdfs.iter().any(|p| p.id == drag_id);
+            if in_group {
+                if let Some(ptr) = pointer {
+                    if let Some((target, _)) = rects.iter().find(|(id, r)| id != &drag_id && r.contains(ptr)) {
+                        let from = self.data.pdfs.iter().position(|p| p.id == drag_id);
+                        let to = self.data.pdfs.iter().position(|p| &p.id == target);
+                        if let (Some(from), Some(to)) = (from, to) {
+                            // `to` is the target's index in the original order; after
+                            // removing `from` it lands just past a forward-moved item
+                            // and just before a backward-moved one — an intuitive swap.
+                            let item = self.data.pdfs.remove(from);
+                            self.data.pdfs.insert(to.min(self.data.pdfs.len()), item);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// "All PDFs", grouped into topic sections (a PDF may appear under several).
@@ -1138,16 +1172,21 @@ impl Folio {
         ui.add_space(8.0);
     }
 
-    fn ui_card(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, pdf: &PdfEntry, w: f32, cover_h: f32) {
+    fn ui_card(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, pdf: &PdfEntry, w: f32, cover_h: f32) -> egui::Response {
         let pal = self.pal;
         let total_h = cover_h + 46.0;
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, total_h), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, total_h), Sense::click_and_drag());
+        let dragging = self.drag_pdf.as_deref() == Some(pdf.id.as_str());
+        if resp.drag_started() {
+            self.drag_pdf = Some(pdf.id.clone());
+        }
         let popup_id = egui::Id::new(("card-menu", pdf.id.as_str()));
         let popup_open = ui.memory(|m| m.is_popup_open(popup_id));
         let p = ui.painter().clone();
-        let active = resp.hovered() || popup_open;
+        let active = resp.hovered() || popup_open || dragging;
         p.rect_filled(rect, CornerRadius::same(10), if active { pal.card_hov } else { pal.card });
-        p.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0_f32, if active { pal.accent.gamma_multiply(0.6) } else { pal.border }), egui::StrokeKind::Inside);
+        let border = if dragging { Stroke::new(1.6_f32, pal.accent) } else { Stroke::new(1.0_f32, if active { pal.accent.gamma_multiply(0.6) } else { pal.border }) };
+        p.rect_stroke(rect, CornerRadius::same(10), border, egui::StrokeKind::Inside);
 
         let cover_rect = Rect::from_min_size(rect.min, Vec2::new(w, cover_h));
 
@@ -1214,11 +1253,15 @@ impl Folio {
             self.card_menu(ui, pdf);
         });
 
-        // open the reader on a plain card click (not when using the ⋯ menu)
+        // open the reader on a plain card click (a drag reorders instead)
         if resp.clicked() && !dots_resp.hovered() && !popup_open {
             self.open_reader(pdf);
         }
+        if dragging {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
         resp.context_menu(|ui| self.card_menu(ui, pdf));
+        resp
     }
 
     fn card_menu(&mut self, ui: &mut egui::Ui, pdf: &PdfEntry) {
