@@ -16,6 +16,16 @@ Text can be selected directly on the page and copied. Highlights in five colours
 
 The complete library state (topics, tags, document entries and highlights) can be exported or imported as a single JSON file. Persistent data is stored in the platform application data directory as `folio-data.json`.
 
+## Screenshots
+
+The library view groups PDF covers by topic, with topics and tags in the sidebar:
+
+![Folio library view](docs/screenshots/library.png)
+
+The reader offers a table-of-contents panel, page navigation, zoom and five highlight colours:
+
+![Folio reader view](docs/screenshots/reader.png)
+
 ## Download
 
 Pre-built binaries are available from the [Releases](https://github.com/HanielUlises/folio/releases) page.
