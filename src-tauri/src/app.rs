@@ -577,6 +577,15 @@ impl Folio {
                     }
                 }
             }
+            Res::Sizes { path, sizes } => {
+                if let Some(r) = &mut self.reader {
+                    if r.path == path {
+                        for (slot, size) in r.pages.iter_mut().zip(sizes) {
+                            slot.size_pts = Some(size);
+                        }
+                    }
+                }
+            }
             Res::OpenFailed { path, err } => {
                 if let Some(r) = &mut self.reader {
                     if r.path == path {
@@ -718,7 +727,7 @@ impl eframe::App for Folio {
                             }
                         });
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("v0.8.7 · native").color(pal.txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("v0.8.8 · native").color(pal.txt_dim).size(11.0));
 
                         // ── Google Drive sync control ─────────────────────────
                         #[cfg(feature = "drive")]
@@ -1779,6 +1788,10 @@ impl Folio {
         let area_out = area
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
+                    // Zero egui's automatic item-spacing so the page column's
+                    // layout advance is exactly `height*zoom + 10` per page —
+                    // matching the jump-to-page and zoom-anchor math below.
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add_space(12.0);
                     for idx in 0..page_count {
                         let slot = &mut reader.pages[idx as usize];

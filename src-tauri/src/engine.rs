@@ -48,6 +48,12 @@ pub enum Res {
         path: String,
         items: Vec<OutlineItem>,
     },
+    /// Exact size (in points) of every page, so page layout and jump-to-page are
+    /// accurate before a page is rendered (page sizing needs no rendering).
+    Sizes {
+        path: String,
+        sizes: Vec<(f32, f32)>,
+    },
     OpenFailed {
         path: String,
         err: String,
@@ -166,6 +172,12 @@ fn handle(
                         page_count: d.page_count,
                         first_size: first,
                     });
+                    // All page sizes up front (fast — no rendering) so jumps and
+                    // layout are exact even for pages not yet drawn.
+                    let sizes: Vec<(f32, f32)> = (0..d.page_count)
+                        .map(|i| d.page_size(i).unwrap_or(first))
+                        .collect();
+                    let _ = tx.send(Res::Sizes { path: path.clone(), sizes });
                     let _ = tx.send(Res::Outline { path, items });
                 }
                 Err(e) => {
