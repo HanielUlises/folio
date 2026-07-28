@@ -227,6 +227,13 @@ pub struct Folio {
     confirm_delete_topic: Option<String>, // topic id awaiting delete confirmation
     #[cfg(feature = "drive")]
     drive: crate::drive::DriveState,
+    // Linux trackpad pinch-to-zoom (winit doesn't deliver pinch on X11/Wayland).
+    #[cfg(target_os = "linux")]
+    pinch: crate::pinch::PinchListener,
+    /// Cumulative pinch zoom factor received since the last frame; folded into
+    /// the zoom step in `apply_scroll_zoom`. Refreshed at the top of `update`.
+    #[cfg(target_os = "linux")]
+    pinch_factor: f32,
 }
 
 impl Folio {
@@ -269,6 +276,10 @@ impl Folio {
             confirm_delete_topic: None,
             #[cfg(feature = "drive")]
             drive: crate::drive::DriveState::new(),
+            #[cfg(target_os = "linux")]
+            pinch: crate::pinch::PinchListener::spawn(cc.egui_ctx.clone()),
+            #[cfg(target_os = "linux")]
+            pinch_factor: 1.0,
         }
     }
 
@@ -628,6 +639,13 @@ impl Folio {
 impl eframe::App for Folio {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let pal = self.pal;
+        // Drain any trackpad pinch that arrived since the last frame. Done every
+        // frame (not only in the reader) so factors never pile up in the channel
+        // and fire late; `apply_scroll_zoom` consumes this when a doc is open.
+        #[cfg(target_os = "linux")]
+        {
+            self.pinch_factor = self.pinch.take_factor();
+        }
         // absorb everything the worker produced since the last frame
         for res in self.worker.drain() {
             self.handle_res(ctx, res);
@@ -1680,7 +1698,15 @@ impl Folio {
     /// point under the pointer visually fixed, or `None` if nothing zoomed.
     fn apply_scroll_zoom(&mut self, ctx: &egui::Context, viewport_top: f32) -> Option<f32> {
         let (zoom_delta, hover) = ctx.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
-        if (zoom_delta - 1.0).abs() < 1e-3 {
+        // On Linux, egui's zoom_delta is always 1.0 for a trackpad pinch (winit
+        // never delivers the gesture), so fold in the factor our libinput reader
+        // captured. On other platforms this is a no-op (field absent).
+        #[cfg(target_os = "linux")]
+        let zoom_delta = zoom_delta * self.pinch_factor;
+        // Small threshold — a single libinput pinch step is only ~1e-4, and each
+        // is applied once (the factor is reset every frame), so anything the
+        // reader forwards must clear this or the zoom stalls.
+        if (zoom_delta - 1.0).abs() < 5e-5 {
             return None;
         }
         let hover = hover?;

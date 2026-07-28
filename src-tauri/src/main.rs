@@ -8,6 +8,8 @@ mod icon;
 mod integrate;
 mod model;
 mod pdf;
+#[cfg(target_os = "linux")]
+mod pinch;
 
 use eframe::egui;
 

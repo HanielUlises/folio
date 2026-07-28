@@ -40,6 +40,14 @@ sha2      = { version = "0.10", optional = true }
 base64    = { version = "0.22", optional = true }
 getrandom = { version = "0.2", optional = true }
 
+# ── Linux trackpad pinch-to-zoom (libinput) ──────────────────────────────────
+# winit does not deliver touchpad pinch gestures on X11/Wayland, so we read them
+# straight from libinput in a background thread. Capped at the 1.19 API so it
+# links against the widely-shipped libinput 1.20 runtime (1.21+ symbols absent).
+[target.'cfg(target_os = "linux")'.dependencies]
+input = { version = "0.10", default-features = false, features = ["udev", "libinput_1_19"] }
+libc  = "0.2"
+
 [features]
 # Networked Google Drive support. Off by default so the standard build stays
 # fully offline with no TLS/HTTP dependencies.
