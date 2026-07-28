@@ -19,6 +19,9 @@ pub enum Icon {
     Chevron,  // collapse indicator (points down when open)
     ChevronRight,
     Sidebar,  // panel toggle
+    Hand,     // pan / drag tool
+    Cursor,   // text-selection I-beam
+    Marker,   // highlighter
 }
 
 /// Draw `icon` centred in `rect`, tinted `color`. The icon is inscribed in the
@@ -119,6 +122,39 @@ pub fn draw(p: &Painter, icon: Icon, rect: Rect, color: Color32) {
             p.rect_stroke(Rect::from_min_max(pt(0.16, 0.22), pt(0.84, 0.78)), egui::CornerRadius::same(2), s, egui::StrokeKind::Middle);
             line(pt(0.42, 0.22), pt(0.42, 0.78));
         }
+        Icon::Hand => {
+            // An open hand for "drag / move the page": the palm is an open cup
+            // (sides + rounded bottom, no lid) so the fingers reading above it
+            // don't merge into a solid box, plus a thumb to one side.
+            p.add(Shape::line(
+                vec![
+                    pt(0.30, 0.40),
+                    pt(0.30, 0.66),
+                    pt(0.36, 0.78),
+                    pt(0.64, 0.78),
+                    pt(0.70, 0.66),
+                    pt(0.70, 0.40),
+                ],
+                s,
+            ));
+            for x in [0.38f32, 0.50, 0.62] {
+                line(pt(x, 0.44), pt(x, 0.22)); // three fingers
+            }
+            line(pt(0.30, 0.52), pt(0.18, 0.44)); // thumb
+        }
+        Icon::Cursor => {
+            // Text I-beam.
+            line(pt(0.5, 0.22), pt(0.5, 0.78));
+            line(pt(0.4, 0.22), pt(0.6, 0.22));
+            line(pt(0.4, 0.78), pt(0.6, 0.78));
+        }
+        Icon::Marker => {
+            // Three lines of text with the middle one emphasised — the ISOTYPE
+            // reading of "select text and highlight it". Pairs with the I-beam.
+            line(pt(0.2, 0.30), pt(0.8, 0.30));
+            p.line_segment([pt(0.2, 0.5), pt(0.8, 0.5)], Stroke::new(w * 2.6, color)); // highlighted
+            line(pt(0.2, 0.70), pt(0.66, 0.70));
+        }
     }
 }
 
@@ -129,6 +165,29 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32, hover_bg
         ui.painter().rect_filled(rect, egui::CornerRadius::same(6), hover_bg);
     }
     let tint = if resp.hovered() { color } else { color.gamma_multiply(0.85) };
+    draw(ui.painter(), icon, rect.shrink(size * 0.2), tint);
+    resp
+}
+
+/// Icon-only toggle button. When `active`, it is drawn with a persistent
+/// highlighted background so the selected tool reads at a glance (ISOTYPE:
+/// the state is carried by the pictogram, not a text label).
+pub fn toggle(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    color: Color32,
+    active_bg: Color32,
+    hover_bg: Color32,
+    active: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
+    if active {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), active_bg);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), hover_bg);
+    }
+    let tint = if active || resp.hovered() { color } else { color.gamma_multiply(0.85) };
     draw(ui.painter(), icon, rect.shrink(size * 0.2), tint);
     resp
 }

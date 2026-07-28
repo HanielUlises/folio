@@ -52,34 +52,28 @@ jobs:
         with:
           toolchain: 1.97.1
 
-      - name: Build
-        working-directory: src-tauri
-        run: cargo build --release
-
-      # pdfium is loaded at runtime, so it isn't needed to compile — but the
-      # release needs pdfium.dll shipped next to folio.exe. Fetch the prebuilt
-      # Windows binary from bblanchon/pdfium-binaries.
+      # pdfium is embedded into the executable at build time (see build.rs), so
+      # fetch the prebuilt Windows DLL *before* building and place it where the
+      # build script looks. The resulting folio.exe is fully self-contained.
       - name: Fetch pdfium.dll
         shell: pwsh
         run: |
           $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
           Invoke-WebRequest -Uri $url -OutFile pdfium.tgz
-          tar -xzf pdfium.tgz bin/pdfium.dll
-          if (-not (Test-Path bin/pdfium.dll)) { throw "pdfium.dll was not extracted from the archive" }
+          New-Item -ItemType Directory -Force -Path src-tauri/pdfium | Out-Null
+          tar -xzf pdfium.tgz -C src-tauri/pdfium --strip-components=1 bin/pdfium.dll
+          if (-not (Test-Path src-tauri/pdfium/pdfium.dll)) { throw "pdfium.dll was not extracted from the archive" }
 
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/folio | Out-Null
-          Copy-Item src-tauri/target/release/folio.exe dist/folio/
-          Copy-Item bin/pdfium.dll dist/folio/
-          Compress-Archive -Path dist/folio/* -DestinationPath dist/folio-windows-x86_64.zip
+      - name: Build
+        working-directory: src-tauri
+        run: cargo build --release
 
+      # A single self-contained executable — no DLL shipped alongside it.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: folio-windows-x86_64
-          path: dist/folio-windows-x86_64.zip
+          path: src-tauri/target/release/folio.exe
 
   release:
     needs: [build-linux, build-windows]
@@ -98,6 +92,6 @@ jobs:
         with:
           files: |
             dist/**/folio-linux-x86_64.tar.gz
-            dist/**/folio-windows-x86_64.zip
+            dist/**/folio.exe
           generate_release_notes: true
           draft: false

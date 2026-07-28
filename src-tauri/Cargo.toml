@@ -1,6 +1,6 @@
 [package]
 name = "folio"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Folio — a fast, native PDF reader and organiser (pure Rust, egui)"
 default-run = "folio"

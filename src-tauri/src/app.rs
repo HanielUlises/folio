@@ -105,6 +105,16 @@ enum View {
     Reader,
 }
 
+/// The active pointer modality in the reader. Following the ISOTYPE idea, each
+/// mode is a single clear pictogram rather than a hidden modifier: the hand
+/// drags the page, the I-beam selects text, the marker selects and highlights.
+#[derive(Clone, Copy, PartialEq)]
+enum ReaderTool {
+    Pan,       // drag to move the page; no text selection
+    Select,    // drag to select text
+    Highlight, // drag to select text and highlight it in one gesture
+}
+
 /// How the "All PDFs" view arranges cards.
 #[derive(Clone, Copy, PartialEq)]
 enum LibLayout {
@@ -182,6 +192,7 @@ struct Reader {
     outline: Vec<OutlineItem>,   // table of contents
     scroll_to_page: Option<u32>, // pending jump target (1-based)
     jump_input: String,          // page-number box contents
+    tool: ReaderTool,            // active pointer modality
 }
 
 pub struct Folio {
@@ -364,6 +375,7 @@ impl Folio {
             outline: Vec::new(),
             scroll_to_page: None,
             jump_input: String::new(),
+            tool: ReaderTool::Pan,
         });
         self.view = View::Reader;
     }
@@ -500,7 +512,7 @@ impl eframe::App for Folio {
                             }
                         });
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("v0.7 · native").color(pal.txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("v0.8 · native").color(pal.txt_dim).size(11.0));
                     });
                 });
             });
@@ -1072,15 +1084,33 @@ impl Folio {
                         ui.label(egui::RichText::new(format!("{}%", (r.zoom * 100.0).round() as i32)).color(pal.txt_dim).size(12.0));
                         if ui.button(" +  ").clicked() { zoom_delta = 0.2; }
                         ui.separator();
-                        ui.label(egui::RichText::new("Highlight:").color(pal.txt_dim).size(12.0));
-                        for c in HL_COLORS {
-                            let sel = &r.hl_color == c;
-                            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                            ui.painter().circle_filled(rect.center(), 8.0, parse_hex(c));
-                            if sel {
-                                ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(2.0_f32, pal.txt));
+                        // ISOTYPE tool selector: one pictogram per pointer mode.
+                        let active_bg = pal.accent.gamma_multiply(0.32);
+                        for (t, ic, tip) in [
+                            (ReaderTool::Pan, Icon::Hand, "Pan, drag to move the page (1)"),
+                            (ReaderTool::Select, Icon::Cursor, "Select text (2)"),
+                            (ReaderTool::Highlight, Icon::Marker, "Select & highlight (3)"),
+                        ] {
+                            if icon::toggle(ui, ic, 26.0, pal.txt, active_bg, pal.card_hov, r.tool == t)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                r.tool = t;
                             }
-                            if resp.clicked() { r.hl_color = c.to_string(); }
+                        }
+                        // The highlight palette appears only once the marker is
+                        // chosen, rather than always occupying the toolbar.
+                        if r.tool == ReaderTool::Highlight {
+                            ui.separator();
+                            for c in HL_COLORS {
+                                let sel = &r.hl_color == c;
+                                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                                ui.painter().circle_filled(rect.center(), 8.0, parse_hex(c));
+                                if sel {
+                                    ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(2.0_f32, pal.txt));
+                                }
+                                if resp.clicked() { r.hl_color = c.to_string(); }
+                            }
                         }
                         if r.selection.as_ref().map(|s| !s.text.is_empty()).unwrap_or(false) {
                             ui.separator();
@@ -1121,6 +1151,21 @@ impl Folio {
         if let Some(r) = &mut self.reader {
             if zin { r.zoom = (r.zoom + 0.2).clamp(0.5, 4.0); }
             if zout { r.zoom = (r.zoom - 0.2).clamp(0.5, 4.0); }
+        }
+
+        // Number keys switch tools — but not while a text field (the page jump
+        // box) is focused, where they are ordinary input.
+        if ctx.memory(|m| m.focused()).is_none() {
+            let (t1, t2, t3) = ctx.input(|i| (
+                i.key_pressed(egui::Key::Num1),
+                i.key_pressed(egui::Key::Num2),
+                i.key_pressed(egui::Key::Num3),
+            ));
+            if let Some(r) = &mut self.reader {
+                if t1 { r.tool = ReaderTool::Pan; }
+                if t2 { r.tool = ReaderTool::Select; }
+                if t3 { r.tool = ReaderTool::Highlight; }
+            }
         }
 
         // Okular-style contents panel: jump-to-page + table of contents.
@@ -1240,6 +1285,7 @@ impl Folio {
         }
 
         let zoom = reader.zoom;
+        let tool = reader.tool;
         let path = reader.path.clone();
         let pdf_id = reader.pdf_id.clone();
         let hl_color = reader.hl_color.clone();
@@ -1271,9 +1317,10 @@ impl Folio {
             reader.current_page = target;
         }
 
-        let mut area = egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::both()
             .auto_shrink([false, false])
-            .drag_to_scroll(false); // drags are for text selection, not panning
+            // In Pan mode a drag moves the page; otherwise drags select text.
+            .drag_to_scroll(tool == ReaderTool::Pan);
         if let Some(off) = forced_offset {
             area = area.vertical_scroll_offset(off);
         }
@@ -1290,7 +1337,10 @@ impl Folio {
                             slot.lines = Some(build_lines(slot.chars.as_ref().unwrap()));
                         }
 
-                        let (rect, resp) = ui.allocate_exact_size(disp, Sense::click_and_drag());
+                        // In Pan mode the page only senses hover, so drags fall
+                        // through to the scroll area and move the page.
+                        let sense = if tool == ReaderTool::Pan { Sense::hover() } else { Sense::click_and_drag() };
+                        let (rect, resp) = ui.allocate_exact_size(disp, sense);
                         let visible = ui.is_rect_visible(rect);
                         if visible && !first_visible_set {
                             top_visible_page = idx + 1;
@@ -1347,8 +1397,16 @@ impl Folio {
                                 }
                             }
 
+                            // Pan mode: no text interaction, just a grab cursor;
+                            // the drag is consumed by the scroll area.
+                            if tool == ReaderTool::Pan {
+                                if resp.hovered() {
+                                    let down = ui.input(|i| i.pointer.primary_down());
+                                    ui.ctx().set_cursor_icon(if down { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+                                }
+                            }
                             // text interaction: I-beam cursor, drag-select, word-select, hit-testing
-                            if let (Some(chars), Some(lines)) = (&slot.chars, &slot.lines) {
+                            else if let (Some(chars), Some(lines)) = (&slot.chars, &slot.lines) {
                                 // Which stored highlight (if any) is under a page-point position?
                                 let over_highlight = |pos: Pos2| -> Option<String> {
                                     let fx = (pos.x - rect.left()) / disp.x;
@@ -1414,11 +1472,26 @@ impl Folio {
                                     }
                                 }
 
-                                // finished a drag → materialise selection text
+                                // finished a drag → materialise selection text, and
+                                // in Highlight mode apply the highlight immediately.
                                 if resp.drag_stopped() {
                                     if let Some(cur) = &reader.selection {
                                         if cur.page == idx + 1 {
                                             let text = selection_text(chars, cur.start, cur.end);
+                                            if tool == ReaderTool::Highlight && !text.is_empty() {
+                                                let rects = selection_rects(chars, lines, cur.start, cur.end)
+                                                    .into_iter()
+                                                    .map(|(x0, y0, x1, y1)| HighlightRect {
+                                                        x: x0 / w_pts, y: y0 / h_pts, w: (x1 - x0) / w_pts, h: (y1 - y0) / h_pts,
+                                                    })
+                                                    .collect();
+                                                save_highlight = Some(PdfHighlight {
+                                                    id: uuid::Uuid::new_v4().to_string(),
+                                                    page: cur.page,
+                                                    rects,
+                                                    color: hl_color.clone(),
+                                                });
+                                            }
                                             new_selection = Some(Selection { page: cur.page, start: cur.start, end: cur.end, text });
                                         }
                                     }
@@ -1453,43 +1526,6 @@ impl Folio {
             reader.pending_delete = Some((id, pos));
         }
         reader.current_page = top_visible_page;
-
-        // Floating "Highlight selection" button. Snapshot the selection first so
-        // the closure never borrows `reader` (avoids aliasing).
-        let sel_snapshot = reader.selection.as_ref().filter(|s| !s.text.is_empty()).map(|s| {
-            let page_idx = (s.page - 1) as usize;
-            (
-                s.page,
-                s.start,
-                s.end,
-                reader.pages[page_idx].chars.clone(),
-                reader.pages[page_idx].lines.clone(),
-                reader.pages[page_idx].size_pts.unwrap_or(default_size),
-            )
-        });
-        let mut clear_selection = false;
-        if let Some((page, start, end, chars, lines, (w_pts, h_pts))) = sel_snapshot {
-            egui::Area::new(egui::Id::new("hl-fab")).anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0]).show(ctx, |ui| {
-                egui::Frame::new().fill(pal.card).stroke(Stroke::new(1.0_f32, pal.border)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(egui::RichText::new("Highlight selection").color(Color32::BLACK)).fill(parse_hex(&hl_color))).clicked() {
-                            if let (Some(chars), Some(lines)) = (&chars, &lines) {
-                                let rects = selection_rects(chars, lines, start, end).into_iter().map(|(x0, y0, x1, y1)| HighlightRect {
-                                    x: x0 / w_pts, y: y0 / h_pts, w: (x1 - x0) / w_pts, h: (y1 - y0) / h_pts,
-                                }).collect();
-                                save_highlight = Some(PdfHighlight { id: uuid::Uuid::new_v4().to_string(), page, rects, color: hl_color.clone() });
-                            }
-                        }
-                        if ui.button("×").clicked() {
-                            clear_selection = true;
-                        }
-                    });
-                });
-            });
-        }
-        if clear_selection {
-            reader.selection = None;
-        }
 
         // Delete-confirmation popup, anchored just off the cursor where the
         // highlight was clicked. Nothing is removed until "Delete" is pressed.
@@ -1561,6 +1597,8 @@ fn setup_style(ctx: &egui::Context, pal: &Pal, dark: bool) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal.border);
     visuals.selection.bg_fill = pal.accent.gamma_multiply(0.35);
     ctx.set_visuals(visuals);
+    // Ctrl +/-/0 should zoom the page only, not egui's whole-UI scale factor.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
 }
 
 fn upload(ctx: &egui::Context, name: &str, img: ColorImage) -> TextureHandle {

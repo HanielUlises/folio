@@ -8,6 +8,41 @@
 use pdfium_render::prelude::*;
 use std::path::PathBuf;
 
+/// The pdfium shared library, embedded so the executable is self-contained.
+/// `build.rs` places the platform library here.
+const EMBEDDED_PDFIUM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pdfium_embedded.bin"));
+
+/// Extract the embedded pdfium library to a cache directory and return the
+/// directory it was written to, so it can be added to the load search path.
+///
+/// Best-effort: returns `None` if the library could not be written (e.g. a
+/// read-only cache), in which case the caller falls back to the other search
+/// locations. The extracted copy is reused across runs when it already matches
+/// the embedded bytes.
+fn extracted_pdfium_dir() -> Option<PathBuf> {
+    let libname = Pdfium::pdfium_platform_library_name();
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("folio")
+        .join("pdfium");
+    let target = dir.join(&libname);
+
+    let up_to_date = std::fs::metadata(&target)
+        .map(|m| m.len() == EMBEDDED_PDFIUM.len() as u64)
+        .unwrap_or(false);
+    if !up_to_date {
+        std::fs::create_dir_all(&dir).ok()?;
+        // Write to a temp file and rename so a concurrent run never sees a
+        // half-written library.
+        let mut tmp_name = libname.clone();
+        tmp_name.push(".tmp");
+        let tmp = dir.join(&tmp_name);
+        std::fs::write(&tmp, EMBEDDED_PDFIUM).ok()?;
+        std::fs::rename(&tmp, &target).ok()?;
+    }
+    Some(dir)
+}
+
 /// One rendered page as RGBA8, ready to upload as an egui texture.
 pub struct PageImage {
     pub width: usize,
@@ -44,10 +79,15 @@ pub struct Doc {
 
 impl Engine {
     pub fn new() -> Result<Self, String> {
-        // Search a few likely locations for the shared library.
+        // Search a few likely locations for the shared library. The embedded
+        // copy, extracted to the cache directory, is tried first so a bare
+        // executable works with no library shipped alongside it.
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Some(d) = std::env::var_os("FOLIO_PDFIUM_DIR") {
             dirs.push(PathBuf::from(d));
+        }
+        if let Some(d) = extracted_pdfium_dir() {
+            dirs.push(d);
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(p) = exe.parent() {

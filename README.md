@@ -30,13 +30,15 @@ The reader offers a table-of-contents panel, page navigation, zoom and five high
 
 Pre-built binaries are available from the [Releases](https://github.com/HanielUlises/folio/releases) page.
 
-- **Linux** (`folio-linux-x86_64.tar.gz`): extract and run the `folio` executable. The required `libpdfium.so` is included alongside it.
-- **Windows** (`folio-windows-x86_64.zip`): extract and run `folio.exe`. Keep the bundled `pdfium.dll` in the same folder as the executable.
+- **Linux** (`folio-linux-x86_64.tar.gz`): extract and run the `folio` executable.
+- **Windows** (`folio.exe`): download and run it directly — no installation, no separate files.
+
+The pdfium library is embedded in the executable and extracted to a per-user cache directory on first run, so nothing needs to be kept alongside it.
 
 ## Requirements
 
 - Rust 1.97.1 (specified in `rust-toolchain.toml`)
 - A working OpenGL implementation (on Linux: X11 or Wayland)
-- The pdfium shared library next to the executable — `libpdfium.so` on Linux, `pdfium.dll` on Windows. Both are included in the release packages; a Linux copy is vendored under `src-tauri/pdfium/` for building from source.
+- The pdfium shared library — `libpdfium.so` on Linux, `pdfium.dll` on Windows. This is **embedded into the release executables** by `build.rs`, so pre-built binaries need nothing extra. When building from source, the library is taken from `src-tauri/pdfium/` (a Linux copy is vendored there; set `FOLIO_PDFIUM_EMBED` to point elsewhere, e.g. to supply `pdfium.dll` on Windows).
 
-At runtime the application searches for the pdfium library in the following order: `$FOLIO_PDFIUM_DIR`, the directory containing the executable (including a `pdfium/` subdirectory), the vendored copy under `src-tauri/pdfium/`, and finally the system library path.
+At runtime the application searches for the pdfium library in the following order: `$FOLIO_PDFIUM_DIR`, the embedded copy extracted to the per-user cache directory, the directory containing the executable (including a `pdfium/` subdirectory), the vendored copy under `src-tauri/pdfium/`, and finally the system library path.
