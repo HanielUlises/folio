@@ -6,7 +6,7 @@ use pdfium_render::prelude::*;
 fn main() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/pdfium");
     let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&dir))
-        .expect("failed to bind to libpdfium.so in src-tauri/pdfium");
+        .expect("failed to bind to the pdfium library in src-tauri/pdfium");
     let pdfium = Pdfium::new(bindings);
     println!("OK: pdfium bound and initialised from {dir}");
 

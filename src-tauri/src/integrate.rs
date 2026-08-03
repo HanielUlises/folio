@@ -3,7 +3,12 @@
 //! Registers Folio with the OS application menu so it can be found and launched
 //! by name, without any separate installer — the moment the extracted binary is
 //! run once, it shows up. Best-effort, idempotent and per-user (no elevation).
+//!
+//! macOS is deliberately a no-op: Spotlight and Launchpad index `.app` bundles,
+//! so dragging `Folio.app` to /Applications *is* the registration. See
+//! `scripts/bundle-macos.sh`, which builds that bundle.
 
+#[cfg(any(all(unix, not(target_os = "macos")), target_os = "windows"))]
 use std::path::Path;
 
 /// Register the app in the OS launcher if not already done. Safe to call every

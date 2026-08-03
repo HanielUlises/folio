@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - 'v*'
+  # Lets you build and download the artifacts from the Actions tab without
+  # tagging, to check a release before publishing it. The `release` job below
+  # is skipped in that case.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -75,9 +79,77 @@ jobs:
           name: folio-windows-x86_64
           path: src-tauri/target/release/folio.exe
 
+  build-macos:
+    # An Apple Silicon runner; it cross-compiles the Intel slice with the same
+    # SDK, so one job produces the universal binary.
+    runs-on: macos-14
+    env:
+      # Optional. Set these repository secrets to get a build that a
+      # non-technical user can simply double-click; without them the DMG still
+      # builds, but macOS asks the user to approve it on first launch.
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      # Signing needs the certificate in a keychain. A throwaway keychain keeps
+      # it off the runner's default one and out of any other job.
+      - name: Import Developer ID certificate
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/folio-signing.keychain-db"
+          PASSWORD="$(uuidgen)"
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          echo -n "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # Builds both slices, lipos them together, assembles the bundle and the
+      # disk image. It also downloads libpdfium.dylib, which build.rs embeds
+      # into the binary, so no separate fetch step is needed here.
+      # The signing variables are empty when the secrets are unset, which makes
+      # the script fall back to ad-hoc signing.
+      - name: Build Folio.app and DMG
+        env:
+          FOLIO_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          FOLIO_NOTARIZE_APPLE_ID: ${{ secrets.APPLE_ID }}
+          FOLIO_NOTARIZE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          FOLIO_NOTARIZE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          # Default to ad-hoc when no identity secret is configured.
+          : "${FOLIO_SIGN_IDENTITY:=-}"
+          export FOLIO_SIGN_IDENTITY
+          scripts/bundle-macos.sh --arch universal --features drive --dmg
+
+      - name: Rename artifact
+        run: mv dist/folio-macos.dmg dist/folio-macos-universal.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: folio-macos-universal
+          path: dist/folio-macos-universal.dmg
+
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
+    # Only publish for a real tag; a manual run just leaves the artifacts.
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
 
@@ -93,5 +165,6 @@ jobs:
           files: |
             dist/**/folio-linux-x86_64.tar.gz
             dist/**/folio.exe
+            dist/**/folio-macos-universal.dmg
           generate_release_notes: true
           draft: false

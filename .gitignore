@@ -26,6 +26,11 @@ src-tauri/target/
 src-tauri/bundler/
 src-tauri/gen/
 
+# Only the Linux pdfium build is committed; the others are fetched at build
+# time (see src-tauri/pdfium/README.md).
+src-tauri/pdfium/libpdfium.dylib
+src-tauri/pdfium/pdfium.dll
+
 *.app
 *.dmg
 

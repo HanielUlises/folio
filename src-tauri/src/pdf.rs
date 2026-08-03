@@ -93,6 +93,12 @@ impl Engine {
             if let Some(p) = exe.parent() {
                 dirs.push(p.to_path_buf());
                 dirs.push(p.join("pdfium"));
+                // Inside a macOS .app the executable lives in `Contents/MacOS`;
+                // shared libraries belong in the sibling `Contents/Frameworks`.
+                #[cfg(target_os = "macos")]
+                if let Some(contents) = p.parent() {
+                    dirs.push(contents.join("Frameworks"));
+                }
             }
         }
         dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pdfium"));
@@ -108,7 +114,9 @@ impl Engine {
         }
         let bindings = bindings
             .or_else(|| Pdfium::bind_to_system_library().ok())
-            .ok_or_else(|| "libpdfium.so not found".to_string())?;
+            .ok_or_else(|| {
+                format!("{} not found", Pdfium::pdfium_platform_library_name().to_string_lossy())
+            })?;
 
         let pdfium: &'static Pdfium = Box::leak(Box::new(Pdfium::new(bindings)));
         Ok(Self { pdfium })
