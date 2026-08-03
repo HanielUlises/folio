@@ -4,11 +4,13 @@
 <dict>
     <!--
       Notarisation requires the hardened runtime, which by default only lets a
-      process load libraries signed by the same team. Folio embeds pdfium and
-      extracts it to a cache directory at first run (see src/pdf.rs); that copy
-      carries upstream's ad-hoc signature, not ours, so library validation would
-      refuse to load it and the app would die on launch. Disabling validation is
-      the supported way to allow it, and is accepted by the notary service.
+      process load libraries signed by the same team. The pdfium in
+      Contents/Frameworks is re-signed with our identity and so would pass, but
+      Folio also embeds pdfium and can extract it to a cache directory (see
+      src/pdf.rs) when it is run as a bare executable rather than a bundle.
+      That copy carries upstream's ad-hoc signature, not ours, so library
+      validation would refuse it and the app would die on launch. Disabling
+      validation is the supported way to allow it, and the notary accepts it.
     -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>

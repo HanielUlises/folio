@@ -40,4 +40,10 @@ before changing the pin in `scripts/bundle-macos.sh`.
 `scripts/bundle-macos.sh` performs the macOS download itself when the file is
 missing, so the above is only needed for a plain `cargo build` on a Mac.
 
+On macOS the library is *also* copied into `Folio.app/Contents/Frameworks/` and
+signed with the bundle, not just embedded. macOS refuses to `dlopen` the copy
+the app extracts to `~/Library/Caches` while the app is quarantined — which is
+the state of any freshly downloaded app — so the in-bundle copy is what
+actually loads. `src/pdf.rs` searches `Contents/Frameworks` before the cache.
+
 To build against a library kept elsewhere, point `FOLIO_PDFIUM_EMBED` at it.

@@ -91,7 +91,14 @@ done
 # ── assemble the bundle ──────────────────────────────────────────────────────
 echo "==> assembling Folio.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+
+# Ship pdfium inside the bundle even though it is also embedded in the binary.
+# The embedded copy is extracted to ~/Library/Caches at first run, and macOS
+# will not dlopen that copy when Folio itself is quarantined — which is the
+# normal state of a freshly downloaded app. The library here is signed as part
+# of the bundle, so it always loads; src/pdf.rs looks in Frameworks first.
+cp "$DYLIB" "$APP/Contents/Frameworks/libpdfium.dylib"
 
 binaries=()
 for target in "${TARGETS[@]}"; do
@@ -131,18 +138,25 @@ PLIST
 # Apple Silicon refuses to execute a binary with no signature at all, and `lipo`
 # strips whatever the linker attached, so signing is never optional.
 IDENTITY="${FOLIO_SIGN_IDENTITY:--}"
+# Sign inside out: nested code first, then the bundle, so the outer signature
+# seals the already-signed pdfium. `--deep` is the shortcut for this and Apple
+# discourages it for anything that gets notarised.
 if [[ "$IDENTITY" == "-" ]]; then
     echo "==> ad-hoc signing (not distributable — see the note at the end)"
-    codesign --force --deep --sign - "$APP"
+    codesign --force --sign - "$APP/Contents/Frameworks/libpdfium.dylib"
+    codesign --force --sign - "$APP"
 else
     echo "==> signing with: $IDENTITY"
     # The hardened runtime is mandatory for notarisation; the entitlements let
     # the app load the pdfium copy it extracts at runtime.
-    codesign --force --deep --timestamp --options runtime \
+    codesign --force --timestamp --options runtime \
+        --sign "$IDENTITY" "$APP/Contents/Frameworks/libpdfium.dylib"
+    codesign --force --timestamp --options runtime \
         --entitlements "$CRATE/macos/Folio.entitlements" \
         --sign "$IDENTITY" "$APP"
 fi
-codesign --verify --strict "$APP" && echo "signature OK"
+# --deep so the nested pdfium is verified too, not just the outer bundle.
+codesign --verify --deep --strict "$APP" && echo "signature OK"
 
 # ── notarise ─────────────────────────────────────────────────────────────────
 NOTARIZED=0
@@ -166,7 +180,9 @@ if [[ "$MAKE_DMG" == "1" ]]; then
     echo "==> building disk image"
     DMG="$DIST/folio-macos.dmg"
     stage="$(mktemp -d)"
-    cp -R "$APP" "$stage/"
+    # ditto, not cp -R: it preserves the extended attributes and resource forks
+    # that a code signature depends on.
+    ditto "$APP" "$stage/Folio.app"
     # The Applications symlink is what makes the window a drag-to-install target.
     ln -s /Applications "$stage/Applications"
     if [[ "$NOTARIZED" == "0" ]]; then

@@ -12,6 +12,31 @@ use std::path::PathBuf;
 /// `build.rs` places the platform library here.
 const EMBEDDED_PDFIUM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pdfium_embedded.bin"));
 
+/// Remove the `com.apple.quarantine` attribute from a freshly written file.
+///
+/// macOS propagates quarantine from a quarantined process to everything it
+/// writes, and then refuses to `dlopen` the result unless it is notarised.
+/// Opening Folio straight from the downloaded disk image is exactly that case,
+/// so the library we just extracted would be unloadable. The bytes came from
+/// inside our own executable, so clearing the flag adds no exposure.
+#[cfg(target_os = "macos")]
+fn strip_quarantine(path: &std::path::Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let (Ok(p), Ok(name)) = (
+        CString::new(path.as_os_str().as_bytes()),
+        CString::new("com.apple.quarantine"),
+    ) else {
+        return;
+    };
+    // SAFETY: both pointers are valid NUL-terminated C strings that outlive the
+    // call. Failure (usually "attribute not present") is expected and ignored.
+    unsafe {
+        libc::removexattr(p.as_ptr(), name.as_ptr(), 0);
+    }
+}
+
 /// Extract the embedded pdfium library to a cache directory and return the
 /// directory it was written to, so it can be added to the load search path.
 ///
@@ -40,6 +65,8 @@ fn extracted_pdfium_dir() -> Option<PathBuf> {
         std::fs::write(&tmp, EMBEDDED_PDFIUM).ok()?;
         std::fs::rename(&tmp, &target).ok()?;
     }
+    #[cfg(target_os = "macos")]
+    strip_quarantine(&target);
     Some(dir)
 }
 
@@ -79,15 +106,15 @@ pub struct Doc {
 
 impl Engine {
     pub fn new() -> Result<Self, String> {
-        // Search a few likely locations for the shared library. The embedded
-        // copy, extracted to the cache directory, is tried first so a bare
-        // executable works with no library shipped alongside it.
+        // Search a few likely locations for the shared library. Copies shipped
+        // next to the executable come first: inside a macOS .app the library in
+        // `Contents/Frameworks` is covered by the bundle's code signature,
+        // whereas the extracted fallback below is not, and Gatekeeper may
+        // refuse to load it. The embedded copy is the last resort, so a bare
+        // executable still works with no library shipped alongside it.
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Some(d) = std::env::var_os("FOLIO_PDFIUM_DIR") {
             dirs.push(PathBuf::from(d));
-        }
-        if let Some(d) = extracted_pdfium_dir() {
-            dirs.push(d);
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(p) = exe.parent() {
@@ -102,20 +129,32 @@ impl Engine {
             }
         }
         dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pdfium"));
+        if let Some(d) = extracted_pdfium_dir() {
+            dirs.push(d);
+        }
 
+        // Keep every failure: "not found" on its own is indistinguishable from
+        // "found but refused to load", which is the interesting case.
         let mut bindings = None;
+        let mut attempts: Vec<String> = Vec::new();
         for d in &dirs {
-            if let Ok(b) =
-                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(d))
-            {
-                bindings = Some(b);
-                break;
+            let path = Pdfium::pdfium_platform_library_name_at_path(d);
+            match Pdfium::bind_to_library(&path) {
+                Ok(b) => {
+                    bindings = Some(b);
+                    break;
+                }
+                Err(e) => attempts.push(format!("  {}: {e}", path.display())),
             }
         }
         let bindings = bindings
             .or_else(|| Pdfium::bind_to_system_library().ok())
             .ok_or_else(|| {
-                format!("{} not found", Pdfium::pdfium_platform_library_name().to_string_lossy())
+                format!(
+                    "{} could not be loaded. Tried:\n{}",
+                    Pdfium::pdfium_platform_library_name().to_string_lossy(),
+                    attempts.join("\n")
+                )
             })?;
 
         let pdfium: &'static Pdfium = Box::leak(Box::new(Pdfium::new(bindings)));

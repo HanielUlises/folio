@@ -1,6 +1,6 @@
 [package]
 name = "folio"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 description = "Folio — a fast, native PDF reader and organiser (pure Rust, egui)"
 default-run = "folio"
@@ -47,6 +47,11 @@ getrandom = { version = "0.2", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 input = { version = "0.10", default-features = false, features = ["udev", "libinput_1_19"] }
 libc  = "0.2"
+
+# Clearing the quarantine attribute from the extracted pdfium copy (see
+# src/pdf.rs) needs removexattr(2).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [features]
 # Networked Google Drive support. Off by default so the standard build stays

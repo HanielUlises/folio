@@ -49,7 +49,7 @@ Pre-built binaries are available from the [Releases](https://github.com/HanielUl
   Intel Macs — requiring macOS 11 Big Sur or later.
 - **Windows** (`folio.exe`): download and run it directly no installation, no separate files.
 
-The pdfium library is embedded in the executable and extracted to a per-user cache directory on first run, so nothing needs to be kept alongside it.
+The pdfium library is embedded in the executable and extracted to a per-user cache directory on first run, so nothing needs to be kept alongside it. (The macOS app carries its copy inside the bundle instead, where Gatekeeper accepts it as part of the signed app.)
 
 #### First launch on macOS
 
